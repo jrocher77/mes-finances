@@ -1325,6 +1325,7 @@ function CleanupBlockedToast({ reasons, onClose }) {
 function App() {
   const [user,       setUser]    = useState(undefined); // undefined = checking, null = not logged in
   const [tab,        setTab]     = useState("dashboard");
+  const dashboardResetRef = useRef(null);
   const [showForm,   setForm]    = useState(false);
   const [formAccount,setFormAcc] = useState(null);
   const [formSel,    setFormSel] = useState(null);
@@ -1464,12 +1465,12 @@ function App() {
           </div>
         )}
         <div style={{ flex:1, overflowY:"auto", paddingBottom:80 }}>
-          {tab==="dashboard"     && <Dashboard    store={store} onAdd={handleOpenForm} onGoSavings={()=>setTab("savingsStats")} />}
+          {tab==="dashboard"     && <Dashboard    store={store} onAdd={handleOpenForm} onGoSavings={()=>setTab("savingsStats")} onResetRef={dashboardResetRef} />}
           {tab==="transactions"  && <Transactions store={store} onAdd={handleOpenForm} />}
           {tab==="settings"      && <Settings     store={store} user={user} />}
           {tab==="savingsStats"  && <SavingsStats store={store} onBack={()=>setTab("dashboard")} />}
         </div>
-        <TabBar tab={tab === "savingsStats" ? "dashboard" : tab} setTab={setTab} />
+        <TabBar tab={tab === "savingsStats" ? "dashboard" : tab} setTab={setTab} onDashboardClick={()=>{ if(dashboardResetRef.current) dashboardResetRef.current(); }} />
         {showForm && <FormModal store={store} account={formAccount} sel={formSel} onClose={()=>setForm(false)} />}
       </div>
     </ThemeCtx.Provider>
@@ -1501,7 +1502,7 @@ const TAB_ICONS = {
   ),
 };
 
-function TabBar({ tab, setTab }) {
+function TabBar({ tab, setTab, onDashboardClick }) {
   const tabs = [
     { id:"dashboard",    label:"Tableau"    },
     { id:"transactions", label:"Historique" },
@@ -1510,7 +1511,7 @@ function TabBar({ tab, setTab }) {
   return (
     <div style={{ position:"fixed", bottom:0, left:"50%", transform:"translateX(-50%)", width:"100%", maxWidth:480, background:"var(--tab-bg)", backdropFilter:"blur(20px)", borderTop:"1px solid var(--border)", display:"flex", justifyContent:"space-around", padding:"10px 0 16px", zIndex:100 }}>
       {tabs.map(t => (
-        <button key={t.id} onClick={()=>setTab(t.id)} onTouchStart={()=>{}} className={`tabbar-btn${tab===t.id ? " active" : ""}`} style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:3, background:"none", border:"none", padding:"4px 16px" }}>
+        <button key={t.id} onClick={()=>{ if(t.id==="dashboard" && tab==="dashboard" && onDashboardClick) onDashboardClick(); setTab(t.id); }} onTouchStart={()=>{}} className={`tabbar-btn${tab===t.id ? " active" : ""}`} style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:3, background:"none", border:"none", padding:"4px 16px" }}>
           {TAB_ICONS[t.id]}
           <span style={{ fontSize:10, fontWeight:500, letterSpacing:"0.04em" }}>{t.label}</span>
         </button>
@@ -2241,7 +2242,7 @@ function SynthCardPanel({ entry, sourceTxs, clickedTxId, setClickedTxId, store, 
   );
 }
 
-function Dashboard({ store, onAdd, onGoSavings }) {
+function Dashboard({ store, onAdd, onGoSavings, onResetRef }) {
   const [sel,              setSel]            = useState(nowMKey());
   const [selectedAccountId,setSelectedAccount] = useState("all");
   const [editingTx,        setEditingTx]      = useState(null);
@@ -2250,18 +2251,11 @@ function Dashboard({ store, onAdd, onGoSavings }) {
   const [cardFormAccount,  setCardFormAccount] = useState(null); // accountId for card add form
   const [benefitAccount,   setBenefitAccount] = useState(null); // account to show in BenefitModal
 
+  // Register reset function so TabBar can reset to home view
+  useEffect(() => { if (onResetRef) onResetRef.current = () => { setSelectedAccount("all"); setSel(nowMKey()); }; }, [onResetRef]);
   // Benefit accounts + current month balance for header button
   const benefitAccounts = store.accounts.filter(a => a.type === "benefit");
-  const benefitHeaderBalance = useMemo(() => {
-    return benefitAccounts.reduce((total, acc) => {
-      const bd = store.benefitData[acc.id] || { allotments: {}, expenses: [] };
-      const mk = nowMKey();
-      const carry  = computeCarryOver(bd, mk);
-      const allotted = allotmentAmount(bd.allotments?.[mk]);
-      const exp    = (bd.expenses || []).filter(e => mKey(e.date) === mk).reduce((s,e) => s + e.amount, 0);
-      return total + carry + allotted - exp;
-    }, 0);
-  }, [store.benefitData, store.accounts]);
+
 
   const months = useMemo(() => {
     const today = new Date();
@@ -2451,36 +2445,13 @@ function Dashboard({ store, onAdd, onGoSavings }) {
 
   return (
     <div>
-      <PageHeader title="Mon Budget">
-        {benefitAccounts.length > 0 && (
-          <div style={{ display:"flex", justifyContent:"flex-end" }}>
-            <button
-              onClick={()=>setBenefitAccount(benefitAccounts.length === 1 ? benefitAccounts[0] : benefitAccounts[0])}
-              style={{ display:"flex", alignItems:"center", gap:5, padding:"5px 11px", borderRadius:20,
-                background:"rgba(76,175,130,0.12)", border:"1px solid rgba(76,175,130,0.35)",
-                color: benefitHeaderBalance >= 0 ? "var(--green)" : "var(--red)",
-                fontSize:12, fontWeight:700, letterSpacing:"0.01em", flexShrink:0 }}>
-              <span style={{ fontSize:14 }}>🎫</span>
-              <span style={{ fontSize:11, fontWeight:700, letterSpacing:"0.04em" }}>
-                {benefitAccounts[0].name.split(/\s+/).map(w=>w[0]).join("").toUpperCase().slice(0,4)}
-              </span>
-              {fmtEur(benefitHeaderBalance)}
-            </button>
-          </div>
-        )}
-      </PageHeader>
+      <PageHeader title="Mon Budget" />
       <div style={{ padding:"16px", display:"flex", flexDirection:"column", gap:14 }}>
 
         {/* Month tabs */}
         <MonthTabs months={months} selected={sel} onSelect={setSel} />
 
-        {/* Account tabs */}
-        <div style={S.gap6}>
-          <button onClick={()=>setSelectedAccount("all")} style={{ flexShrink:0, padding:"6px 14px", borderRadius:20, border:"1px solid", borderColor:selectedAccountId==="all"?"var(--gold)":"var(--border)", background:selectedAccountId==="all"?"var(--gold-dim)":"var(--surface2)", color:selectedAccountId==="all"?"var(--gold)":"var(--text-muted)", fontSize:13, fontWeight:600, transition:"all 0.2s" }}>📊 Tous les comptes</button>
-          {store.accounts.filter(a=>a.type==="checking").map(acc=>(
-            <button key={acc.id} onClick={()=>setSelectedAccount(acc.id)} style={{ flexShrink:0, padding:"6px 14px", borderRadius:20, border:"1px solid", borderColor:selectedAccountId===acc.id?"var(--gold)":"var(--border)", background:selectedAccountId===acc.id?"var(--gold-dim)":"var(--surface2)", color:selectedAccountId===acc.id?"var(--gold)":"var(--text-muted)", fontSize:13, fontWeight:600, transition:"all 0.2s" }}>💳 {acc.name}</button>
-          ))}
-        </div>
+
 
         {/* Parity + template */}
         {selectedAccountId!=="all" && !isSavings && (
@@ -2519,6 +2490,21 @@ function Dashboard({ store, onAdd, onGoSavings }) {
         )}
 
         {/* All accounts breakdown */}
+        {/* Income / Expense — affiché AVANT le tableau des comptes en vue globale */}
+        {selectedAccountId==="all" && (
+          <div className="fade-up" style={S.grid2col10}>
+            {[{label:"Revenus",val:income,color:"var(--green)",bg:"var(--green-dim)",icon:"↓"},{label:"Dépenses",val:expns,color:"var(--red)",bg:"var(--red-dim)",icon:"↑"}].map(c=>(
+              <div key={c.label} style={{ background:"var(--surface)", border:"1px solid var(--border)", borderRadius:"var(--radius)", padding:"16px" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:8 }}>
+                  <span style={{ width:26,height:26, borderRadius:8, background:c.bg, display:"flex", alignItems:"center", justifyContent:"center", fontSize:14, color:c.color, fontWeight:700 }}>{c.icon}</span>
+                  <span style={{ fontSize:12, color:"var(--text-muted)", fontWeight:500 }}>{c.label}</span>
+                </div>
+                <p style={{ fontFamily:"'DM Serif Display',serif", fontSize:22, color:c.color }}>{fmtEur(c.val)}</p>
+              </div>
+            ))}
+          </div>
+        )}
+
         {selectedAccountId==="all" && (accountBalances.checking.length>0||accountBalances.savings.length>0) && (
           <div className="fade-up" style={{ background:"var(--surface)", border:"1px solid var(--border)", borderRadius:"var(--radius)", padding:16, animationDelay:"0.05s" }}>
             {accountBalances.checking.length>0 && <>
@@ -2528,12 +2514,17 @@ function Dashboard({ store, onAdd, onGoSavings }) {
               </div>
               <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:accountBalances.savings.length>0?16:0 }}>
                 {accountBalances.checking.map(({account,balance})=>(
-                  <div key={account.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 12px", background:"var(--surface2)", borderRadius:"var(--radius-sm)" }}>
+                  <div key={account.id} onClick={()=>setSelectedAccount(account.id)} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 12px", background:"var(--surface2)", borderRadius:"var(--radius-sm)", cursor:"pointer", transition:"background 0.15s" }}
+                    onMouseEnter={e=>e.currentTarget.style.background="var(--surface3)"}
+                    onMouseLeave={e=>e.currentTarget.style.background="var(--surface2)"}>
                     <div style={S.flexRow8}>
                       <span style={{ fontSize:13, fontWeight:500 }}>{account.name}</span>
                       {account.cardName && <span style={{ fontSize:10, padding:"1px 6px", borderRadius:4, background:"rgba(201,168,76,0.12)", color:"var(--gold)", fontWeight:600, border:"1px solid rgba(201,168,76,0.25)" }}>💳 {account.cardName}</span>}
                     </div>
-                    <span style={{ fontSize:14, fontWeight:700, fontFamily:"'DM Serif Display',serif", color:balance>=0?"var(--green)":"var(--red)" }}>{fmtEur(balance)}</span>
+                    <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                      <span style={{ fontSize:14, fontWeight:700, fontFamily:"'DM Serif Display',serif", color:balance>=0?"var(--green)":"var(--red)" }}>{fmtEur(balance)}</span>
+                      <span style={{ fontSize:12, color:"var(--text-sub)" }}>›</span>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -2552,21 +2543,50 @@ function Dashboard({ store, onAdd, onGoSavings }) {
                 ))}
               </div>
             </>}
+            {benefitAccounts.length>0 && <>
+              {(accountBalances.checking.length>0||accountBalances.savings.length>0) && <div style={{ height:1, background:"var(--border)", margin:"16px 0" }} />}
+              <div style={{ display:"flex", alignItems:"center", marginBottom:12 }}>
+                <div style={S.flexRow10}><span style={{ fontSize:24 }}>🎫</span><p style={{ fontSize:14, fontWeight:600, color:"var(--text)", letterSpacing:"0.04em", textTransform:"uppercase" }}>Avantages</p></div>
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {benefitAccounts.map(acc => {
+                  const bd = store.benefitData[acc.id] || { allotments:{}, expenses:[] };
+                  const carry    = computeCarryOver(bd, sel);
+                  const allotted = allotmentAmount(bd.allotments?.[sel]);
+                  const exp      = (bd.expenses||[]).filter(e=>mKey(e.date)===sel).reduce((s,e)=>s+e.amount,0);
+                  const available = carry + allotted - exp;
+                  return (
+                    <div key={acc.id} onClick={()=>setBenefitAccount(acc)}
+                      style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 12px", background:"var(--surface2)", borderRadius:"var(--radius-sm)", cursor:"pointer", transition:"background 0.15s" }}
+                      onMouseEnter={e=>e.currentTarget.style.background="var(--surface3)"}
+                      onMouseLeave={e=>e.currentTarget.style.background="var(--surface2)"}>
+                      <span style={{ fontSize:13, fontWeight:500 }}>{acc.name}</span>
+                      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                        <span style={{ fontSize:14, fontWeight:700, fontFamily:"'DM Serif Display',serif", color:available>=0?"var(--green)":"var(--red)" }}>{fmtEur(available)}</span>
+                        <span style={{ fontSize:12, color:"var(--text-sub)" }}>›</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>}
           </div>
         )}
 
-        {/* Income / Expense (non-card) */}
-        <div className="fade-up" style={S.grid2col10}>
-          {[{label:"Revenus",val:income,color:"var(--green)",bg:"var(--green-dim)",icon:"↓"},{label:"Dépenses",val:expns,color:"var(--red)",bg:"var(--red-dim)",icon:"↑"}].map(c=>(
-            <div key={c.label} style={{ background:"var(--surface)", border:"1px solid var(--border)", borderRadius:"var(--radius)", padding:"16px" }}>
-              <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:8 }}>
-                <span style={{ width:26,height:26, borderRadius:8, background:c.bg, display:"flex", alignItems:"center", justifyContent:"center", fontSize:14, color:c.color, fontWeight:700 }}>{c.icon}</span>
-                <span style={{ fontSize:12, color:"var(--text-muted)", fontWeight:500 }}>{c.label}</span>
+        {/* Income / Expense — affiché APRÈS le solde en vue compte individuel */}
+        {selectedAccountId!=="all" && (
+          <div className="fade-up" style={S.grid2col10}>
+            {[{label:"Revenus",val:income,color:"var(--green)",bg:"var(--green-dim)",icon:"↓"},{label:"Dépenses",val:expns,color:"var(--red)",bg:"var(--red-dim)",icon:"↑"}].map(c=>(
+              <div key={c.label} style={{ background:"var(--surface)", border:"1px solid var(--border)", borderRadius:"var(--radius)", padding:"16px" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:8 }}>
+                  <span style={{ width:26,height:26, borderRadius:8, background:c.bg, display:"flex", alignItems:"center", justifyContent:"center", fontSize:14, color:c.color, fontWeight:700 }}>{c.icon}</span>
+                  <span style={{ fontSize:12, color:"var(--text-muted)", fontWeight:500 }}>{c.label}</span>
+                </div>
+                <p style={{ fontFamily:"'DM Serif Display',serif", fontSize:22, color:c.color }}>{fmtEur(c.val)}</p>
               </div>
-              <p style={{ fontFamily:"'DM Serif Display',serif", fontSize:22, color:c.color }}>{fmtEur(c.val)}</p>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
 
         {/* ─── Carte à débit différé panel ─── */}
         {hasCard && (
@@ -2601,22 +2621,24 @@ function Dashboard({ store, onAdd, onGoSavings }) {
           />
         ))}
 
-        {/* Recent (non-card) */}
-        <div className="fade-up">
-          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
-            <p style={{ fontSize:11, fontWeight:600, color:"var(--text-sub)", letterSpacing:"0.06em", textTransform:"uppercase" }}>Récents</p>
-            <button onClick={()=>onAdd(selectedAccountId==="all" ? null : selectedAccountId, sel)} style={{ background:"none", border:"none", color:"var(--gold)", fontSize:13, fontWeight:600, padding:0, cursor:"pointer" }}>+ Ajouter</button>
+        {/* Recent (non-card) — masqué en vue globale, visible uniquement par compte */}
+        {selectedAccountId!=="all" && (
+          <div className="fade-up">
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
+              <p style={{ fontSize:11, fontWeight:600, color:"var(--text-sub)", letterSpacing:"0.06em", textTransform:"uppercase" }}>Récents</p>
+              <button onClick={()=>onAdd(selectedAccountId, sel)} style={{ background:"none", border:"none", color:"var(--gold)", fontSize:13, fontWeight:600, padding:0, cursor:"pointer" }}>+ Ajouter</button>
+            </div>
+            {txM.length===0 ? <EmptyState text="Aucune transaction ce mois-ci" />
+              : <div style={{ background:"var(--surface)", border:"1px solid var(--border)", borderRadius:"var(--radius)", overflow:"hidden" }}>
+                  {txM.slice(0,15).map((tx,i)=>(
+                    <div key={tx.id}>
+                      {i>0&&<div style={{ height:1, background:"var(--border)", margin:"0 16px" }} />}
+                      <TxRow tx={tx} deletable clicked={clickedTxId===tx.id} onToggleClicked={id=>setClickedTxId(clickedTxId===id?null:id)} onDelete={()=>setDeletingTx(tx)} onEdit={()=>setEditingTx(tx)} onTogglePointed={()=>store.togglePointed(tx.id)} delay={i*0.04} />
+                    </div>
+                  ))}
+                </div>}
           </div>
-          {txM.length===0 ? <EmptyState text="Aucune transaction ce mois-ci" />
-            : <div style={{ background:"var(--surface)", border:"1px solid var(--border)", borderRadius:"var(--radius)", overflow:"hidden" }}>
-                {txM.slice(0,15).map((tx,i)=>(
-                  <div key={tx.id}>
-                    {i>0&&<div style={{ height:1, background:"var(--border)", margin:"0 16px" }} />}
-                    <TxRow tx={tx} deletable clicked={clickedTxId===tx.id} onToggleClicked={id=>setClickedTxId(clickedTxId===id?null:id)} onDelete={()=>setDeletingTx(tx)} onEdit={()=>setEditingTx(tx)} onTogglePointed={()=>store.togglePointed(tx.id)} delay={i*0.04} accountName={selectedAccountId==="all" ? store.accounts.find(a=>a.id===tx.accountId)?.name : null} />
-                  </div>
-                ))}
-              </div>}
-        </div>
+        )}
       </div>
 
       {editingTx && <FormModal store={store} transaction={editingTx} sel={sel} onClose={()=>setEditingTx(null)} />}
