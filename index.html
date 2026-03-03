@@ -1556,7 +1556,8 @@ function App() {
 
 // ─── BoursePage ────────────────────────────────────────────────────────────
 // Yahoo Finance — sans clé API, proxy CORS pour contourner les restrictions navigateur
-const YF_PROXY = "https://corsproxy.io/?https://query1.finance.yahoo.com/v8/finance";
+const YF_PROXY    = "https://corsproxy.io/?https://query1.finance.yahoo.com/v8/finance";
+const YF_QUOTE    = "https://corsproxy.io/?https://query1.finance.yahoo.com/v7/finance/quote";
 function BoursePage({ user }) {
   const uid = user?.uid;
   const [positions, setPositions] = useState([]);
@@ -1592,39 +1593,59 @@ function BoursePage({ user }) {
     finally { setSaving(false); }
   }, [uid]);
 
-  // ── Fetch des cours via Yahoo Finance ─────────────────────────────────────
-  // Yahoo retourne : regularMarketPrice (c), regularMarketChange (d), regularMarketChangePercent (dp)
+  // ── Fetch des cours via Yahoo Finance v7/quote ────────────────────────────
+  // v7/quote retourne directement regularMarketChange et regularMarketChangePercent,
+  // bien plus fiables que le calcul manuel depuis previousClose (surtout pour les actions EU)
   const fetchQuotes = useCallback(async (pos = positions) => {
     if (!pos.length) return;
     setLoading(true);
-    const results = {};
-    await Promise.all(pos.map(async p => {
-      try {
-        const r = await fetch(`${YF_PROXY}/chart/${encodeURIComponent(p.symbol)}?interval=1d&range=1d`);
-        const d = await r.json();
-        const meta = d?.chart?.result?.[0]?.meta;
-        if (meta?.regularMarketPrice) {
-          results[p.symbol] = {
-            c:  meta.regularMarketPrice,
-            d:  meta.regularMarketPrice - meta.previousClose,
-            dp: ((meta.regularMarketPrice - meta.previousClose) / meta.previousClose) * 100,
-            currency: meta.currency || p.devise,
+    try {
+      const symbols = pos.map(p => p.symbol).join(",");
+      const r = await fetch(`${YF_QUOTE}?symbols=${encodeURIComponent(symbols)}&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,currency`);
+      const d = await r.json();
+      const results = {};
+      (d?.quoteResponse?.result || []).forEach(q => {
+        if (q.regularMarketPrice) {
+          results[q.symbol] = {
+            c:        q.regularMarketPrice,
+            d:        q.regularMarketChange        ?? 0,
+            dp:       q.regularMarketChangePercent ?? 0,
+            currency: q.currency || "EUR",
           };
         }
-      } catch {}
-    }));
-    setQuotes(results);
-    setLastRefresh(new Date());
+      });
+      setQuotes(results);
+      setLastRefresh(new Date());
+    } catch {}
     setLoading(false);
   }, [positions]);
 
   const fetchedRef = useRef(false);
+  const [eurusd, setEurusd] = useState(null); // { rate, change, changePct }
+
+  // ── Fetch du taux EUR/USD via v7/quote ────────────────────────────────────
+  const fetchEurusd = useCallback(async () => {
+    try {
+      const r = await fetch(`${YF_QUOTE}?symbols=EURUSD%3DX&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent`);
+      const d = await r.json();
+      const q = d?.quoteResponse?.result?.[0];
+      if (q?.regularMarketPrice) {
+        setEurusd({
+          rate:      q.regularMarketPrice,
+          change:    q.regularMarketChange        ?? 0,
+          changePct: q.regularMarketChangePercent ?? 0,
+        });
+      }
+    } catch {}
+  }, []);
   useEffect(() => {
     if (positions.length > 0 && !fetchedRef.current) {
       fetchedRef.current = true;
       fetchQuotes(positions);
     }
   }, [positions]);
+
+  useEffect(() => { fetchEurusd(); }, []);
 
   // ── Recherche de symbole via Yahoo Finance ────────────────────────────────
   useEffect(() => {
@@ -1777,7 +1798,7 @@ function BoursePage({ user }) {
     <div style={{ display:"flex", flexDirection:"column", height:"100%", overflowY:"auto", paddingBottom:80 }}>
       <PageHeader title="Bourse">
         <div style={{ display:"flex", alignItems:"center", gap:8, justifyContent:"flex-end" }}>
-          <button onClick={()=>fetchQuotes()} disabled={loading} style={{ display:"flex", alignItems:"center", gap:5, padding:"5px 10px", borderRadius:20, background:"transparent", border:"1px solid var(--border)", color:"var(--text-muted)", fontSize:12 }}>
+          <button onClick={()=>{ fetchQuotes(); fetchEurusd(); }} disabled={loading} style={{ display:"flex", alignItems:"center", gap:5, padding:"5px 10px", borderRadius:20, background:"transparent", border:"1px solid var(--border)", color:"var(--text)", fontSize:12 }}>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={loading?{animation:"spin 0.9s linear infinite"}:{}}>
               <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
             </svg>
@@ -1791,6 +1812,27 @@ function BoursePage({ user }) {
       </PageHeader>
 
       <div style={{ padding:"16px 16px 0" }}>
+
+        {/* ── Taux EUR/USD ── */}
+        <div className="fade-up" style={{ background:"var(--surface)", borderRadius:16, padding:"14px 16px", marginBottom:16, border:"1px solid var(--border)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            <div style={{ width:36, height:36, borderRadius:10, background:"var(--surface2)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16 }}>💱</div>
+            <div>
+              <p style={{ fontSize:11, color:"var(--text-muted)", fontWeight:500, letterSpacing:"0.05em", textTransform:"uppercase", marginBottom:2 }}>EUR / USD</p>
+              <p style={{ fontSize:10, color:"var(--text-sub)" }}>Taux de change</p>
+            </div>
+          </div>
+          {eurusd ? (
+            <div style={{ textAlign:"right" }}>
+              <p style={{ fontSize:22, fontWeight:700, letterSpacing:"-0.02em" }}>{eurusd.rate.toFixed(4)}</p>
+              <p style={{ fontSize:12, fontWeight:500, color: eurusd.change >= 0 ? "#4caf7d" : "#e05c5c" }}>
+                {eurusd.change >= 0 ? "▲" : "▼"} {Math.abs(eurusd.change).toFixed(4)} ({eurusd.change >= 0 ? "+" : ""}{eurusd.changePct.toFixed(2)}%)
+              </p>
+            </div>
+          ) : (
+            <p style={{ fontSize:13, color:"var(--text-muted)" }}>Chargement…</p>
+          )}
+        </div>
 
         {/* ── Récapitulatif portefeuille ── */}
         {positions.length > 0 && (
