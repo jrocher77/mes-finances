@@ -121,7 +121,9 @@ const { useState, useEffect, useMemo, useRef, createContext, useContext, useCall
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 function genId()   { return crypto.randomUUID(); }
-function fmtEur(n) { return new Intl.NumberFormat("fr-FR",{style:"currency",currency:"EUR"}).format(n||0); }
+// Singleton Intl.NumberFormat — instancié une seule fois (création coûteuse)
+const _eurFmt = new Intl.NumberFormat("fr-FR",{style:"currency",currency:"EUR"});
+function fmtEur(n) { return _eurFmt.format(n||0); }
 function fmtDate(s){ return new Date(s+"T00:00:00").toLocaleDateString("fr-FR",{day:"numeric",month:"short",year:"numeric"}); }
 function mKey(s)   { return s.slice(0,7); }
 function nowMKey() {
@@ -1326,6 +1328,7 @@ function App() {
   const [user,       setUser]    = useState(undefined); // undefined = checking, null = not logged in
   const [tab,        setTab]     = useState("dashboard");
   const dashboardResetRef = useRef(null);
+  const scrollRef = useRef(null);
   const [showForm,   setForm]    = useState(false);
   const [formAccount,setFormAcc] = useState(null);
   const [formSel,    setFormSel] = useState(null);
@@ -1464,13 +1467,13 @@ function App() {
             <button onClick={store.clearSaveError} style={{ background:"rgba(255,255,255,0.2)", border:"none", borderRadius:6, color:"#fff", fontSize:12, fontWeight:700, padding:"4px 10px", cursor:"pointer" }}>&#x2715;</button>
           </div>
         )}
-        <div style={{ flex:1, overflowY:"auto", paddingBottom:80 }}>
+        <div ref={scrollRef} style={{ flex:1, overflowY:"auto", paddingBottom:80 }}>
           {tab==="dashboard"     && <Dashboard    store={store} onAdd={handleOpenForm} onGoSavings={()=>setTab("savingsStats")} onResetRef={dashboardResetRef} />}
           {tab==="transactions"  && <Transactions store={store} onAdd={handleOpenForm} />}
           {tab==="settings"      && <Settings     store={store} user={user} />}
           {tab==="savingsStats"  && <SavingsStats store={store} onBack={()=>setTab("dashboard")} />}
         </div>
-        <TabBar tab={tab === "savingsStats" ? "dashboard" : tab} setTab={setTab} onDashboardClick={()=>{ if(dashboardResetRef.current) dashboardResetRef.current(); }} />
+        <TabBar tab={tab === "savingsStats" ? "dashboard" : tab} setTab={setTab} onDashboardClick={()=>{ if(dashboardResetRef.current) dashboardResetRef.current(); if(scrollRef.current) scrollRef.current.scrollTop=0; }} />
         {showForm && <FormModal store={store} account={formAccount} sel={formSel} onClose={()=>setForm(false)} />}
       </div>
     </ThemeCtx.Provider>
@@ -1511,7 +1514,7 @@ function TabBar({ tab, setTab, onDashboardClick }) {
   return (
     <div style={{ position:"fixed", bottom:0, left:"50%", transform:"translateX(-50%)", width:"100%", maxWidth:480, background:"var(--tab-bg)", backdropFilter:"blur(20px)", borderTop:"1px solid var(--border)", display:"flex", justifyContent:"space-around", padding:"10px 0 16px", zIndex:100 }}>
       {tabs.map(t => (
-        <button key={t.id} onClick={()=>{ if(t.id==="dashboard" && tab==="dashboard" && onDashboardClick) onDashboardClick(); setTab(t.id); }} onTouchStart={()=>{}} className={`tabbar-btn${tab===t.id ? " active" : ""}`} style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:3, background:"none", border:"none", padding:"4px 16px" }}>
+        <button key={t.id} onClick={()=>{ if(t.id==="dashboard" && tab==="dashboard" && onDashboardClick) onDashboardClick(); setTab(t.id); }} className={`tabbar-btn${tab===t.id ? " active" : ""}`} style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:3, background:"none", border:"none", padding:"4px 16px" }}>
           {TAB_ICONS[t.id]}
           <span style={{ fontSize:10, fontWeight:500, letterSpacing:"0.04em" }}>{t.label}</span>
         </button>
@@ -1652,7 +1655,7 @@ function CardPanel({ account, sel, cardTxM, cardTotal, cardDebitDate, isDebitNex
   const [editingDate, setEditingDate] = useState(false);
   const [draftDate,   setDraftDate]   = useState(cardDebitDate || "");
   const [showAllCard, setShowAllCard] = useState(false);
-  const CARD_LIMIT = 3;
+  const CARD_LIMIT = 1000;
 
   // Sync draft when month changes
   useEffect(() => {
@@ -1725,32 +1728,37 @@ function CardPanel({ account, sel, cardTxM, cardTotal, cardDebitDate, isDebitNex
       </div>
 
       {/* Card transactions */}
-      {cardTxM.length > 0 && (
-        <div>
-          {(showAllCard ? cardTxM : cardTxM.slice(0, CARD_LIMIT)).map((tx, i) => (
-            <div key={tx.id}>
-              {i > 0 && <div style={{ height:1, background:"var(--border)", margin:"0 16px" }} />}
-              <TxRow
-                tx={tx}
-                deletable
-                clicked={clickedTxId === tx.id}
-                onToggleClicked={id => setClickedTxId(clickedTxId === id ? null : id)}
-                onDelete={() => onDeleteTx(tx)}
-                onEdit={() => onEditTx(tx)}
-                onTogglePointed={() => store.togglePointed(tx.id)}
-                delay={i * 0.03}
-                isCard
-              />
-            </div>
-          ))}
-          {cardTxM.length > CARD_LIMIT && (
-            <button onClick={() => setShowAllCard(p => !p)}
-              style={{ width:"100%", padding:"9px 16px", background:"var(--surface2)", border:"none", borderTop:"1px solid var(--border)", color:"var(--text-muted)", fontSize:12, fontWeight:600, cursor:"pointer", textAlign:"center" }}>
-              {showAllCard ? "▲ Voir moins" : `▼ Voir les ${cardTxM.length - CARD_LIMIT} autres dépenses`}
-            </button>
-          )}
-        </div>
-      )}
+      {cardTxM.length > 0 && (() => {
+        const unpointed = cardTxM.filter(t => !t.pointed);
+        const pointed   = cardTxM.filter(t =>  t.pointed);
+        const visible   = showAllCard ? cardTxM : unpointed.slice(0, CARD_LIMIT);
+        return (
+          <div>
+            {visible.map((tx, i) => (
+              <div key={tx.id}>
+                {i > 0 && <div style={{ height:1, background:"var(--border)", margin:"0 16px" }} />}
+                <TxRow
+                  tx={tx}
+                  deletable
+                  clicked={clickedTxId === tx.id}
+                  onToggleClicked={id => setClickedTxId(clickedTxId === id ? null : id)}
+                  onDelete={() => onDeleteTx(tx)}
+                  onEdit={() => onEditTx(tx)}
+                  onTogglePointed={() => store.togglePointed(tx.id)}
+                  delay={i * 0.03}
+                  isCard
+                />
+              </div>
+            ))}
+            {pointed.length > 0 && (
+              <button onClick={() => setShowAllCard(p => !p)}
+                style={{ width:"100%", padding:"9px 16px", background:"var(--surface2)", border:"none", borderTop:"1px solid var(--border)", color:"var(--text-muted)", fontSize:12, fontWeight:600, cursor:"pointer", textAlign:"center" }}>
+                {showAllCard ? "▲ Voir moins" : `▼ Voir les ${pointed.length} autre${pointed.length > 1 ? "s" : ""} dépense${pointed.length > 1 ? "s" : ""}`}
+              </button>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Empty state */}
       {cardTxM.length === 0 && (
@@ -1790,7 +1798,7 @@ function computeCarryOver(benefitAcct, upToMonthKey) {
   return carry;
 }
 
-function BenefitModal({ store, account, onClose }) {
+function BenefitPage({ store, account, onClose }) {
   const [sel,          setSel]          = useState(nowMKey());
   const [editAllotment,setEditAllotment]= useState(false);
   const [draftMode,    setDraftMode]    = useState("units");
@@ -1925,32 +1933,28 @@ function BenefitModal({ store, account, onClose }) {
   const monthLabel = mk => new Date(mk+"-02T00:00:00").toLocaleDateString("fr-FR",{month:"short",year:"2-digit"});
 
   return (
-    <div style={{ position:"fixed", inset:0, zIndex:300, background:"rgba(0,0,0,0.75)", backdropFilter:"blur(6px)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"flex-end" }}
-      onClick={e=>e.target===e.currentTarget&&onClose()}>
-      <div className="scale-in" style={{ width:"100%", maxWidth:480, background:"var(--surface)", borderRadius:"var(--radius) var(--radius) 0 0", border:"1px solid var(--border)", maxHeight:"90vh", display:"flex", flexDirection:"column", overflow:"hidden" }}>
-
+    <div>
         {/* Header */}
-        <div style={{ display:"flex", alignItems:"center", gap:12, padding:"16px 16px 12px", borderBottom:"1px solid var(--border)", background:"linear-gradient(160deg,#1a1c25,#12131a)", flexShrink:0 }}>
-          <span style={{ fontSize:24 }}>🎫</span>
+        <div style={{ position:"sticky", top:0, zIndex:50, display:"flex", alignItems:"center", gap:12, padding:"8px 16px", borderBottom:"1px solid var(--border)", background:"var(--header-bg)", backdropFilter:"blur(20px)", flexShrink:0 }}>
+          <button onClick={onClose} style={{ background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.12)", borderRadius:8, width:30, height:30, color:"var(--header-muted)", fontSize:18, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>‹</button>
+          <span style={{ fontSize:20 }}>🎫</span>
           <div style={S.flex1}>
-            <p style={{ fontSize:17, fontWeight:700, color:"var(--header-text)", fontFamily:"'DM Serif Display',serif" }}>{account.name}</p>
-            <p style={{ fontSize:11, color:"var(--header-muted)" }}>Avantage salarial</p>
+            <p style={{ fontSize:18, fontWeight:700, color:"var(--header-text)", fontFamily:"'DM Serif Display',serif", letterSpacing:"-0.02em" }}>{account.name}</p>
           </div>
-          <button onClick={onClose} style={{ background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.12)", borderRadius:8, width:30, height:30, color:"var(--header-muted)", fontSize:16, display:"flex", alignItems:"center", justifyContent:"center" }}>✕</button>
         </div>
 
         {/* Month tabs */}
-        <div style={{ display:"flex", gap:6, overflowX:"auto", padding:"10px 16px 6px", flexShrink:0 }} className="scroll-row">
+        <div style={{ display:"flex", gap:6, overflowX:"auto", padding:"12px 16px 6px" }} className="scroll-row">
           {months.map(mk=>(
             <button key={mk} onClick={()=>{setSel(mk);setEditAllotment(false);setAddingExp(false);}}
-              style={{ flexShrink:0, padding:"5px 13px", borderRadius:20, border:"1px solid", borderColor:sel===mk?"var(--gold)":"var(--border)", background:sel===mk?"var(--gold-dim)":"var(--surface2)", color:sel===mk?"var(--gold)":"var(--text-muted)", fontSize:12, fontWeight:600 }}>
+              style={{ flexShrink:0, padding:"6px 14px", borderRadius:20, border:"1px solid", borderColor:sel===mk?"var(--gold)":"var(--border)", background:sel===mk?"var(--gold-dim)":"var(--surface2)", color:sel===mk?"var(--gold)":"var(--text-muted)", fontSize:13, fontWeight:600, transition:"all 0.2s" }}>
               {monthLabel(mk)}
             </button>
           ))}
         </div>
 
-        {/* Scrollable body */}
-        <div style={{ overflowY:"auto", flex:1, padding:"12px 16px 24px", display:"flex", flexDirection:"column", gap:12 }}>
+        {/* Body */}
+        <div style={{ padding:"12px 16px 24px", display:"flex", flexDirection:"column", gap:12 }}>
 
           {/* Balance card */}
           <div style={{ background: available >= 0 ? "linear-gradient(135deg,#1e2a1e,#162216)" : "linear-gradient(135deg,#2a1e1e,#221616)", border:`1px solid ${available>=0?"rgba(76,175,130,0.3)":"rgba(224,92,92,0.3)"}`, borderRadius:"var(--radius)", padding:"16px" }}>
@@ -2124,7 +2128,6 @@ function BenefitModal({ store, account, onClose }) {
           })()}
 
         </div>
-      </div>
 
       {/* Delete expense confirm */}
       {deletingExp && (
@@ -2202,10 +2205,12 @@ function SavingsBalanceRow({ account, balance, store }) {
 }
 
 function SynthCardPanel({ entry, sourceTxs, clickedTxId, setClickedTxId, store, onEdit, onDelete }) {
-  const LIMIT = 3;
+  const LIMIT = 1000;
   const [showAll, setShowAll] = useState(false);
   const sortedTxs = [...sourceTxs].sort((a, b) => b.date.localeCompare(a.date));
-  const visible = showAll ? sortedTxs : sortedTxs.slice(0, LIMIT);
+  const unpointed = sortedTxs.filter(t => !t.pointed);
+  const pointed   = sortedTxs.filter(t =>  t.pointed);
+  const visible   = showAll ? sortedTxs : unpointed.slice(0, LIMIT);
   return (
     <div className="fade-up" style={{ background:"var(--surface)", border:"1px solid var(--border)", borderRadius:"var(--radius)", overflow:"hidden" }}>
       <div style={{ display:"flex", alignItems:"center", gap:10, padding:"12px 16px", background:"var(--surface2)", borderBottom:"1px solid var(--border)" }}>
@@ -2232,10 +2237,10 @@ function SynthCardPanel({ entry, sourceTxs, clickedTxId, setClickedTxId, store, 
           />
         </div>
       ))}
-      {sortedTxs.length > LIMIT && (
+      {pointed.length > 0 && (
         <button onClick={() => setShowAll(p => !p)}
           style={{ width:"100%", padding:"9px 16px", background:"var(--surface2)", border:"none", borderTop:"1px solid var(--border)", color:"var(--text-muted)", fontSize:12, fontWeight:600, cursor:"pointer", textAlign:"center" }}>
-          {showAll ? "▲ Voir moins" : `▼ Voir les ${sortedTxs.length - LIMIT} autres dépenses`}
+          {showAll ? "▲ Voir moins" : `▼ Voir les ${pointed.length} autre${pointed.length > 1 ? "s" : ""} dépense${pointed.length > 1 ? "s" : ""}`}
         </button>
       )}
     </div>
@@ -2249,10 +2254,10 @@ function Dashboard({ store, onAdd, onGoSavings, onResetRef }) {
   const [deletingTx,       setDeletingTx]     = useState(null);
   const [clickedTxId,      setClickedTxId]    = useState(null);
   const [cardFormAccount,  setCardFormAccount] = useState(null); // accountId for card add form
-  const [benefitAccount,   setBenefitAccount] = useState(null); // account to show in BenefitModal
+  const [benefitAccount,   setBenefitAccount] = useState(null); // account shown in BenefitPage
 
   // Register reset function so TabBar can reset to home view
-  useEffect(() => { if (onResetRef) onResetRef.current = () => { setSelectedAccount("all"); setSel(nowMKey()); }; }, [onResetRef]);
+  useEffect(() => { if (onResetRef) onResetRef.current = () => { setSelectedAccount("all"); setSel(nowMKey()); setBenefitAccount(null); }; }, [onResetRef]);
   // Benefit accounts + current month balance for header button
   const benefitAccounts = store.accounts.filter(a => a.type === "benefit");
 
@@ -2445,7 +2450,19 @@ function Dashboard({ store, onAdd, onGoSavings, onResetRef }) {
 
   return (
     <div>
-      <PageHeader title="Mon Budget" />
+      {benefitAccount && (
+        <BenefitPage store={store} account={benefitAccount} onClose={()=>setBenefitAccount(null)} />
+      )}
+      {!benefitAccount && <>
+      {selectedAccountId==="all"
+        ? <PageHeader title="Mon Budget" />
+        : <div style={{ position:"sticky", top:0, zIndex:50, display:"flex", alignItems:"center", gap:12, padding:"8px 16px", borderBottom:"1px solid var(--border)", background:"var(--header-bg)", backdropFilter:"blur(20px)" }}>
+            <button onClick={()=>setSelectedAccount("all")} style={{ background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.12)", borderRadius:8, width:30, height:30, color:"var(--header-muted)", fontSize:18, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>‹</button>
+            <p style={{ fontFamily:"'DM Serif Display',serif", fontSize:18, letterSpacing:"-0.02em", color:"var(--header-text)", flex:1, margin:0 }}>
+              {store.accounts.find(a=>a.id===selectedAccountId)?.name || "Compte"}
+            </p>
+          </div>
+      }
       <div style={{ padding:"16px", display:"flex", flexDirection:"column", gap:14 }}>
 
         {/* Month tabs */}
@@ -2644,7 +2661,7 @@ function Dashboard({ store, onAdd, onGoSavings, onResetRef }) {
       {editingTx && <FormModal store={store} transaction={editingTx} sel={sel} onClose={()=>setEditingTx(null)} />}
       {deletingTx && <DeleteModal tx={deletingTx} onCancel={()=>setDeletingTx(null)} onConfirm={()=>{store.remove(deletingTx.id);setDeletingTx(null);}} />}
       {cardFormAccount && <FormModal store={store} account={cardFormAccount} isCardTransaction sel={sel} onClose={()=>setCardFormAccount(null)} />}
-      {benefitAccount && <BenefitModal store={store} account={benefitAccount} onClose={()=>setBenefitAccount(null)} />}
+      </>}
 
       {/* Unpointed transactions warning modal */}
       {showUnpointedWarning && (
@@ -2752,11 +2769,17 @@ function Transactions({ store, onAdd }) {
         </div>
         {/* Account filters */}
         {checkingAccounts.length > 1 && (
-          <div style={{ display:"flex", gap:6, overflowX:"auto", paddingBottom:2, marginBottom:8 }}>
-            <button onClick={()=>setFilterAcct("all")} style={{ flexShrink:0, padding:"6px 14px", borderRadius:20, border:"1px solid", borderColor:filterAccount==="all"?"var(--gold)":"var(--border)", background:filterAccount==="all"?"var(--gold-dim)":"var(--surface2)", color:filterAccount==="all"?"var(--gold)":"var(--text-muted)", fontSize:13, fontWeight:600, transition:"all 0.2s" }}>📊 Tous les comptes</button>
-            {checkingAccounts.map(acc=>(
-              <button key={acc.id} onClick={()=>setFilterAcct(acc.id)} style={{ flexShrink:0, padding:"6px 14px", borderRadius:20, border:"1px solid", borderColor:filterAccount===acc.id?"var(--gold)":"var(--border)", background:filterAccount===acc.id?"var(--gold-dim)":"var(--surface2)", color:filterAccount===acc.id?"var(--gold)":"var(--text-muted)", fontSize:13, fontWeight:600, transition:"all 0.2s" }}>💳 {acc.name}</button>
-            ))}
+          <div style={{ marginBottom:8 }}>
+            <select
+              value={filterAccount}
+              onChange={e=>setFilterAcct(e.target.value)}
+              style={{ width:"100%", padding:"7px 12px", borderRadius:"var(--radius-sm)", border:"1px solid", borderColor:filterAccount!=="all"?"var(--gold)":"var(--border)", background:"var(--surface2)", color:filterAccount!=="all"?"var(--gold)":"var(--text-muted)", fontSize:13, fontWeight:600, appearance:"auto" }}
+            >
+              <option value="all">📊 Tous les comptes</option>
+              {checkingAccounts.map(acc=>(
+                <option key={acc.id} value={acc.id}>💳 {acc.name}</option>
+              ))}
+            </select>
           </div>
         )}
         {/* Search bar */}
@@ -2958,27 +2981,35 @@ function Settings({ store, user }) {
               Gérez vos comptes (max. 15). Les soldes épargne 💰 sont saisis manuellement.
             </p>
             <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:12 }}>
-              {/* Comptes courants */}
-              {store.accounts.filter(a=>a.type==="checking").length > 0 && (
-                <p style={{ fontSize:10, fontWeight:700, color:"var(--text-sub)", textTransform:"uppercase", letterSpacing:"0.08em" }}>💳 Comptes courants</p>
-              )}
-              {store.accounts.filter(a=>a.type==="checking").map((acc)=>(
-                <AccountRow key={acc.id} acc={acc} store={store} editingAccounts={editingAccounts} />
-              ))}
-              {/* Comptes épargne */}
-              {store.accounts.filter(a=>a.type==="savings").length > 0 && (
-                <p style={{ fontSize:10, fontWeight:700, color:"var(--text-sub)", textTransform:"uppercase", letterSpacing:"0.08em", marginTop:4 }}>💰 Comptes épargne</p>
-              )}
-              {store.accounts.filter(a=>a.type==="savings").map((acc)=>(
-                <AccountRow key={acc.id} acc={acc} store={store} editingAccounts={editingAccounts} />
-              ))}
-              {/* Avantages */}
-              {store.accounts.filter(a=>a.type==="benefit").length > 0 && (
-                <p style={{ fontSize:10, fontWeight:700, color:"var(--text-sub)", textTransform:"uppercase", letterSpacing:"0.08em", marginTop:4 }}>🎫 Avantages</p>
-              )}
-              {store.accounts.filter(a=>a.type==="benefit").map((acc)=>(
-                <AccountRow key={acc.id} acc={acc} store={store} editingAccounts={editingAccounts} />
-              ))}
+              {/* Pré-calcul des listes par type pour éviter 6 filter() redondants au render */}
+              {(() => {
+                const checkingAccounts = store.accounts.filter(a=>a.type==="checking");
+                const savingsAccounts  = store.accounts.filter(a=>a.type==="savings");
+                const benefitAccounts  = store.accounts.filter(a=>a.type==="benefit");
+                return (<>
+                  {/* Comptes courants */}
+                  {checkingAccounts.length > 0 && (
+                    <p style={{ fontSize:10, fontWeight:700, color:"var(--text-sub)", textTransform:"uppercase", letterSpacing:"0.08em" }}>💳 Comptes courants</p>
+                  )}
+                  {checkingAccounts.map((acc)=>(
+                    <AccountRow key={acc.id} acc={acc} store={store} editingAccounts={editingAccounts} />
+                  ))}
+                  {/* Comptes épargne */}
+                  {savingsAccounts.length > 0 && (
+                    <p style={{ fontSize:10, fontWeight:700, color:"var(--text-sub)", textTransform:"uppercase", letterSpacing:"0.08em", marginTop:4 }}>💰 Comptes épargne</p>
+                  )}
+                  {savingsAccounts.map((acc)=>(
+                    <AccountRow key={acc.id} acc={acc} store={store} editingAccounts={editingAccounts} />
+                  ))}
+                  {/* Avantages */}
+                  {benefitAccounts.length > 0 && (
+                    <p style={{ fontSize:10, fontWeight:700, color:"var(--text-sub)", textTransform:"uppercase", letterSpacing:"0.08em", marginTop:4 }}>🎫 Avantages</p>
+                  )}
+                  {benefitAccounts.map((acc)=>(
+                    <AccountRow key={acc.id} acc={acc} store={store} editingAccounts={editingAccounts} />
+                  ))}
+                </>);
+              })()}
             </div>
             {!editingAccounts ? (
               <button onClick={()=>setEditingAccounts(true)} style={{ width:"100%", padding:"10px", borderRadius:"var(--radius-sm)", background:"var(--gold-dim)", border:"1px solid var(--gold)", color:"var(--gold)", fontSize:13, fontWeight:600 }}>✏️ Modifier les comptes</button>
