@@ -1555,8 +1555,8 @@ function App() {
 }
 
 // ─── BoursePage ────────────────────────────────────────────────────────────
-const FINNHUB_KEY   = "d6jasdpr01ql467j0r90d6jasdpr01ql467j0r9g";
-const FINNHUB_PROXY = "https://corsproxy.io/?https://finnhub.io/api/v1";
+// Yahoo Finance — sans clé API, proxy CORS pour contourner les restrictions navigateur
+const YF_PROXY = "https://corsproxy.io/?https://query1.finance.yahoo.com/v8/finance";
 const BOURSE_STORAGE_KEY = "monbudget_portefeuille_v1";
 
 function loadPortefeuille() {
@@ -1579,16 +1579,25 @@ function BoursePage() {
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const searchDebounce = useRef(null);
 
-  // ── Fetch des cours pour toutes les positions ──────────────────────────────
+  // ── Fetch des cours via Yahoo Finance ─────────────────────────────────────
+  // Yahoo retourne : regularMarketPrice (c), regularMarketChange (d), regularMarketChangePercent (dp)
   const fetchQuotes = useCallback(async (pos = positions) => {
     if (!pos.length) return;
     setLoading(true);
     const results = {};
     await Promise.all(pos.map(async p => {
       try {
-        const r = await fetch(`${FINNHUB_PROXY}/quote?symbol=${p.symbol}&token=${FINNHUB_KEY}`);
+        const r = await fetch(`${YF_PROXY}/chart/${encodeURIComponent(p.symbol)}?interval=1d&range=1d`);
         const d = await r.json();
-        if (d.c) results[p.symbol] = d; // { c: current, d: change, dp: change%, h, l, o, pc }
+        const meta = d?.chart?.result?.[0]?.meta;
+        if (meta?.regularMarketPrice) {
+          results[p.symbol] = {
+            c:  meta.regularMarketPrice,
+            d:  meta.regularMarketPrice - meta.previousClose,
+            dp: ((meta.regularMarketPrice - meta.previousClose) / meta.previousClose) * 100,
+            currency: meta.currency || p.devise,
+          };
+        }
       } catch {}
     }));
     setQuotes(results);
@@ -1598,16 +1607,16 @@ function BoursePage() {
 
   useEffect(() => { fetchQuotes(); }, []);
 
-  // ── Recherche de symbole ───────────────────────────────────────────────────
+  // ── Recherche de symbole via Yahoo Finance ────────────────────────────────
   useEffect(() => {
     clearTimeout(searchDebounce.current);
     if (!searchQ.trim() || searchQ.length < 2) { setSearchRes([]); return; }
     setSearchLoading(true);
     searchDebounce.current = setTimeout(async () => {
       try {
-        const r = await fetch(`${FINNHUB_PROXY}/search?q=${encodeURIComponent(searchQ)}&token=${FINNHUB_KEY}`);
+        const r = await fetch(`https://corsproxy.io/?https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(searchQ)}&lang=fr&region=FR&quotesCount=8&newsCount=0`);
         const d = await r.json();
-        setSearchRes((d.result || []).filter(x => x.type === "Common Stock" || x.type === "EQS").slice(0, 8));
+        setSearchRes((d.quotes || []).filter(x => x.quoteType === "EQUITY" || x.quoteType === "ETF").slice(0, 8));
       } catch { setSearchRes([]); }
       setSearchLoading(false);
     }, 500);
@@ -1658,9 +1667,9 @@ function BoursePage() {
       setLocalLoad(true);
       dbRef.current = setTimeout(async () => {
         try {
-          const r = await fetch(`${FINNHUB_PROXY}/search?q=${encodeURIComponent(localQ)}&token=${FINNHUB_KEY}`);
+          const r = await fetch(`https://corsproxy.io/?https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(localQ)}&lang=fr&region=FR&quotesCount=8&newsCount=0`);
           const d = await r.json();
-          setLocalRes((d.result || []).filter(x => x.type === "Common Stock" || x.type === "EQS").slice(0, 6));
+          setLocalRes((d.quotes || []).filter(x => x.quoteType === "EQUITY" || x.quoteType === "ETF").slice(0, 6));
         } catch {}
         setLocalLoad(false);
       }, 400);
@@ -1686,10 +1695,11 @@ function BoursePage() {
               {localRes.length > 0 && (
                 <div style={{ position:"absolute", top:"100%", left:0, right:0, background:"var(--surface2)", border:"1px solid var(--border)", borderRadius:10, zIndex:10, maxHeight:200, overflowY:"auto", marginTop:4 }}>
                   {localRes.map(r => (
-                    <div key={r.symbol} onClick={()=>{ setSymbol(r.symbol); setNom(r.description); setLocalQ(""); setLocalRes([]); }}
+                    <div key={r.symbol} onClick={()=>{ setSymbol(r.symbol); setNom(r.longname || r.shortname || r.symbol); setLocalQ(""); setLocalRes([]); }}
                       style={{ padding:"10px 14px", cursor:"pointer", borderBottom:"1px solid var(--border)", fontSize:13 }}>
                       <span style={{ fontWeight:600, color:"var(--gold)" }}>{r.symbol}</span>
-                      <span style={{ color:"var(--text-muted)", marginLeft:8 }}>{r.description}</span>
+                      <span style={{ color:"var(--text-muted)", marginLeft:8 }}>{r.longname || r.shortname}</span>
+                      {r.exchange && <span style={{ color:"var(--text-sub)", marginLeft:6, fontSize:11 }}>· {r.exchange}</span>}
                     </div>
                   ))}
                 </div>
@@ -1768,7 +1778,7 @@ function BoursePage() {
             <p style={{ fontSize:12, color:"var(--text-muted)", marginBottom:8, fontWeight:500, letterSpacing:"0.05em", textTransform:"uppercase" }}>Portefeuille total</p>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-end", marginBottom:12 }}>
               <div>
-                <p style={{ fontSize:26, fontWeight:700, letterSpacing:"-0.02em" }}>{fmtPrice(totalActuel)} <span style={{ fontSize:13, color:"var(--text-muted)", fontWeight:400 }}>USD*</span></p>
+                <p style={{ fontSize:26, fontWeight:700, letterSpacing:"-0.02em" }}>{fmtPrice(totalActuel)} <span style={{ fontSize:13, color:"var(--text-muted)", fontWeight:400 }}>toutes devises</span></p>
                 <p style={{ fontSize:12, color:"var(--text-muted)", marginTop:2 }}>Investi : {fmtPrice(totalAchat)}</p>
               </div>
               <div style={{ textAlign:"right" }}>
@@ -1841,7 +1851,8 @@ function BoursePage() {
         )}
 
         <p style={{ fontSize:11, color:"var(--text-sub)", textAlign:"center", marginTop:16 }}>
-          * Cours fournis par Finnhub · Délai ~1 min · À titre indicatif
+          * Cours fournis par Yahoo Finance · Délai ~15 min · À titre indicatif<br/>
+          Actions françaises : suffixe <strong>.PA</strong> (ex: MC.PA, AIR.PA) · Allemandes : <strong>.DE</strong> · Britanniques : <strong>.L</strong>
         </p>
       </div>
 
