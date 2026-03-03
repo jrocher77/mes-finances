@@ -1657,9 +1657,9 @@ function BoursePage({ user }) {
     setSearchLoading(true);
     searchDebounce.current = setTimeout(async () => {
       try {
-        const r = await fetch(`https://corsproxy.io/?https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(searchQ)}&lang=fr&region=FR&quotesCount=8&newsCount=0`);
+        const r = await fetch(`https://corsproxy.io/?https://autoc.finance.yahoo.com/autoc?query=${encodeURIComponent(searchQ)}&region=1&lang=fr-FR`);
         const d = await r.json();
-        setSearchRes((d.quotes || []).filter(x => x.quoteType === "EQUITY" || x.quoteType === "ETF").slice(0, 8));
+        setSearchRes((d?.ResultSet?.Result || []).slice(0, 8));
       } catch { setSearchRes([]); }
       setSearchLoading(false);
     }, 500);
@@ -1708,9 +1708,9 @@ function BoursePage({ user }) {
       setLocalLoad(true);
       dbRef.current = setTimeout(async () => {
         try {
-          const r = await fetch(`https://corsproxy.io/?https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(localQ)}&lang=fr&region=FR&quotesCount=8&newsCount=0`);
+          const r = await fetch(`https://corsproxy.io/?https://autoc.finance.yahoo.com/autoc?query=${encodeURIComponent(localQ)}&region=1&lang=fr-FR`);
           const d = await r.json();
-          setLocalRes((d.quotes || []).filter(x => x.quoteType === "EQUITY" || x.quoteType === "ETF").slice(0, 6));
+          setLocalRes((d?.ResultSet?.Result || []).slice(0, 6));
         } catch {}
         setLocalLoad(false);
       }, 400);
@@ -1736,11 +1736,11 @@ function BoursePage({ user }) {
               {localRes.length > 0 && (
                 <div style={{ position:"absolute", top:"100%", left:0, right:0, background:"var(--surface2)", border:"1px solid var(--border)", borderRadius:10, zIndex:10, maxHeight:200, overflowY:"auto", marginTop:4 }}>
                   {localRes.map(r => (
-                    <div key={r.symbol} onClick={()=>{ setSymbol(r.symbol); setNom(r.longname || r.shortname || r.symbol); setLocalQ(""); setLocalRes([]); }}
+                    <div key={r.Symbol} onClick={()=>{ setSymbol(r.Symbol); setNom(r.Name || r.Symbol); setLocalQ(""); setLocalRes([]); }}
                       style={{ padding:"10px 14px", cursor:"pointer", borderBottom:"1px solid var(--border)", fontSize:13 }}>
-                      <span style={{ fontWeight:600, color:"var(--gold)" }}>{r.symbol}</span>
-                      <span style={{ color:"var(--text-muted)", marginLeft:8 }}>{r.longname || r.shortname}</span>
-                      {r.exchange && <span style={{ color:"var(--text-sub)", marginLeft:6, fontSize:11 }}>· {r.exchange}</span>}
+                      <span style={{ fontWeight:600, color:"var(--gold)" }}>{r.Symbol}</span>
+                      <span style={{ color:"var(--text-muted)", marginLeft:8 }}>{r.Name}</span>
+                      {r.Exch && <span style={{ color:"var(--text-sub)", marginLeft:6, fontSize:11 }}>· {r.Exch}</span>}
                     </div>
                   ))}
                 </div>
