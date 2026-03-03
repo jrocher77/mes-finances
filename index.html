@@ -1556,8 +1556,7 @@ function App() {
 
 // ─── BoursePage ────────────────────────────────────────────────────────────
 // Yahoo Finance — sans clé API, proxy CORS pour contourner les restrictions navigateur
-const YF_PROXY    = "https://corsproxy.io/?https://query1.finance.yahoo.com/v8/finance";
-const YF_QUOTE    = "https://corsproxy.io/?https://query1.finance.yahoo.com/v7/finance/quote";
+const YF_PROXY = "https://corsproxy.io/?https://query1.finance.yahoo.com/v8/finance";
 function BoursePage({ user }) {
   const uid = user?.uid;
   const [positions, setPositions] = useState([]);
@@ -1593,47 +1592,51 @@ function BoursePage({ user }) {
     finally { setSaving(false); }
   }, [uid]);
 
-  // ── Fetch des cours via Yahoo Finance v7/quote ────────────────────────────
-  // v7/quote retourne directement regularMarketChange et regularMarketChangePercent,
-  // bien plus fiables que le calcul manuel depuis previousClose (surtout pour les actions EU)
+  // ── Fetch des cours via Yahoo Finance v8/chart ────────────────────────────
+  // interval=1m&range=1d : données intraday → regularMarketPrice fiable + chartPreviousClose
+  // On utilise chartPreviousClose (clôture officielle J-1) pour calculer la variation
   const fetchQuotes = useCallback(async (pos = positions) => {
     if (!pos.length) return;
     setLoading(true);
-    try {
-      const symbols = pos.map(p => p.symbol).join(",");
-      const r = await fetch(`${YF_QUOTE}?symbols=${encodeURIComponent(symbols)}&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,currency`);
-      const d = await r.json();
-      const results = {};
-      (d?.quoteResponse?.result || []).forEach(q => {
-        if (q.regularMarketPrice) {
-          results[q.symbol] = {
-            c:        q.regularMarketPrice,
-            d:        q.regularMarketChange        ?? 0,
-            dp:       q.regularMarketChangePercent ?? 0,
-            currency: q.currency || "EUR",
+    const results = {};
+    await Promise.all(pos.map(async p => {
+      try {
+        const r = await fetch(`${YF_PROXY}/chart/${encodeURIComponent(p.symbol)}?interval=1m&range=1d`);
+        const d = await r.json();
+        const meta = d?.chart?.result?.[0]?.meta;
+        if (meta?.regularMarketPrice != null) {
+          const prev = meta.chartPreviousClose ?? meta.previousClose ?? 0;
+          const curr = meta.regularMarketPrice;
+          results[p.symbol] = {
+            c:        curr,
+            d:        prev ? curr - prev : 0,
+            dp:       prev ? ((curr - prev) / prev) * 100 : 0,
+            currency: meta.currency || p.devise,
           };
         }
-      });
-      setQuotes(results);
-      setLastRefresh(new Date());
-    } catch {}
+      } catch {}
+    }));
+    setQuotes(results);
+    setLastRefresh(new Date());
     setLoading(false);
   }, [positions]);
 
   const fetchedRef = useRef(false);
   const [eurusd, setEurusd] = useState(null); // { rate, change, changePct }
 
-  // ── Fetch du taux EUR/USD via v7/quote ────────────────────────────────────
+  // ── Fetch du taux EUR/USD via v8/chart ────────────────────────────────────
   const fetchEurusd = useCallback(async () => {
     try {
-      const r = await fetch(`${YF_QUOTE}?symbols=EURUSD%3DX&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent`);
+      const r = await fetch(`${YF_PROXY}/chart/EURUSD%3DX?interval=1m&range=1d`);
       const d = await r.json();
-      const q = d?.quoteResponse?.result?.[0];
-      if (q?.regularMarketPrice) {
+      const meta = d?.chart?.result?.[0]?.meta;
+      if (meta?.regularMarketPrice != null) {
+        const prev = meta.chartPreviousClose ?? meta.previousClose ?? 0;
+        const curr = meta.regularMarketPrice;
         setEurusd({
-          rate:      q.regularMarketPrice,
-          change:    q.regularMarketChange        ?? 0,
-          changePct: q.regularMarketChangePercent ?? 0,
+          rate:      curr,
+          change:    prev ? curr - prev : 0,
+          changePct: prev ? ((curr - prev) / prev) * 100 : 0,
         });
       }
     } catch {}
