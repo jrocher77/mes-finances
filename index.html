@@ -1542,7 +1542,7 @@ function App() {
         <div ref={scrollRef} style={{ flex:1, overflowY:"auto", paddingBottom:80 }}>
           {tab==="dashboard"     && <Dashboard    store={store} onAdd={handleOpenForm} onGoSavings={()=>setTab("savingsStats")} onGoCheckingStats={()=>setTab("checkingStats")} onResetRef={dashboardResetRef} />}
           {tab==="transactions"  && <Transactions store={store} onAdd={handleOpenForm} />}
-          {tab==="bourse"        && <BoursePage   store={store} />}
+          {tab==="bourse"        && <BoursePage   store={store} user={user} />}
           {tab==="settings"      && <Settings     store={store} user={user} />}
           {tab==="savingsStats"  && <SavingsStats  store={store} onBack={()=>setTab("dashboard")} />}
           {tab==="checkingStats" && <CheckingStats store={store} onBack={()=>setTab("dashboard")} />}
@@ -1557,27 +1557,40 @@ function App() {
 // ─── BoursePage ────────────────────────────────────────────────────────────
 // Yahoo Finance — sans clé API, proxy CORS pour contourner les restrictions navigateur
 const YF_PROXY = "https://corsproxy.io/?https://query1.finance.yahoo.com/v8/finance";
-const BOURSE_STORAGE_KEY = "monbudget_portefeuille_v1";
-
-function loadPortefeuille() {
-  try { return JSON.parse(localStorage.getItem(BOURSE_STORAGE_KEY)) || []; } catch { return []; }
-}
-function savePortefeuille(positions) {
-  localStorage.setItem(BOURSE_STORAGE_KEY, JSON.stringify(positions));
-}
-
-function BoursePage() {
-  const [positions, setPositions] = useState(loadPortefeuille);
-  const [quotes, setQuotes]       = useState({});       // { symbol: { c, d, dp } }
+function BoursePage({ user }) {
+  const uid = user?.uid;
+  const [positions, setPositions] = useState([]);
+  const [quotes, setQuotes]       = useState({});
   const [loading, setLoading]     = useState(false);
+  const [saving,  setSaving]      = useState(false);
   const [lastRefresh, setLastRefresh] = useState(null);
   const [showForm, setShowForm]   = useState(false);
-  const [editPos, setEditPos]     = useState(null);     // position en cours d'édition
+  const [editPos, setEditPos]     = useState(null);
   const [searchQ, setSearchQ]     = useState("");
   const [searchRes, setSearchRes] = useState([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const searchDebounce = useRef(null);
+
+  // ── Chargement et sync temps réel depuis Firestore ─────────────────────────
+  useEffect(() => {
+    if (!uid) return;
+    const { db, doc, onSnapshot } = fb();
+    const ref = doc(db, "budgets", uid);
+    const unsub = onSnapshot(ref, snap => {
+      const data = snap.exists() ? snap.data() : null;
+      setPositions(data?.portefeuille || []);
+    });
+    return () => unsub();
+  }, [uid]);
+
+  // ── Sauvegarde dans Firestore ──────────────────────────────────────────────
+  const savePositions = useCallback(async (pos) => {
+    if (!uid) return;
+    setSaving(true);
+    try { await fbSave(uid, { portefeuille: pos }); }
+    finally { setSaving(false); }
+  }, [uid]);
 
   // ── Fetch des cours via Yahoo Finance ─────────────────────────────────────
   // Yahoo retourne : regularMarketPrice (c), regularMarketChange (d), regularMarketChangePercent (dp)
@@ -1605,7 +1618,13 @@ function BoursePage() {
     setLoading(false);
   }, [positions]);
 
-  useEffect(() => { fetchQuotes(); }, []);
+  const fetchedRef = useRef(false);
+  useEffect(() => {
+    if (positions.length > 0 && !fetchedRef.current) {
+      fetchedRef.current = true;
+      fetchQuotes(positions);
+    }
+  }, [positions]);
 
   // ── Recherche de symbole via Yahoo Finance ────────────────────────────────
   useEffect(() => {
@@ -1622,8 +1641,6 @@ function BoursePage() {
     }, 500);
   }, [searchQ]);
 
-  // ── Sauvegarde automatique ─────────────────────────────────────────────────
-  useEffect(() => { savePortefeuille(positions); }, [positions]);
 
   // ── Calculs portefeuille ───────────────────────────────────────────────────
   const rows = positions.map(p => {
@@ -1742,6 +1759,7 @@ function BoursePage() {
       updated = [...positions, pos];
     }
     setPositions(updated);
+    savePositions(updated);
     fetchQuotes(updated);
     setShowForm(false);
     setEditPos(null);
@@ -1750,6 +1768,7 @@ function BoursePage() {
   const handleDelete = (id) => {
     const updated = positions.filter(p => p.id !== id);
     setPositions(updated);
+    savePositions(updated);
     setQuotes(q => { const n={...q}; const sym=positions.find(p=>p.id===id)?.symbol; if(sym) delete n[sym]; return n; });
     setDeleteConfirm(null);
   };
@@ -1764,6 +1783,7 @@ function BoursePage() {
             </svg>
             {loading ? "…" : "Actualiser"}
           </button>
+          {saving && <span style={{ fontSize:11, color:"var(--text-muted)" }}>Sync…</span>}
           <button onClick={()=>{ setEditPos(null); setShowForm(true); }} style={{ display:"flex", alignItems:"center", gap:4, padding:"5px 12px", borderRadius:20, background:"var(--gold-dim)", border:"1px solid var(--gold)", color:"var(--gold)", fontSize:12, fontWeight:600 }}>
             <span style={{ fontSize:14 }}>＋</span> Ajouter
           </button>
