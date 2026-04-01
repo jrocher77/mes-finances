@@ -790,8 +790,10 @@ function useStore(uid, email) {
           );
 
           // 3. If there is a positive carry-over to preserve, inject it as a synthetic dotation
-          //    on the previous month (flagged _isCarryOver so the UI can identify it if needed).
+          //    on the previous month (flagged _isCarryOver: true).
           //    This allows computeCarryOver() to return the correct amount for the current month.
+          //    The _isCarryOver flag also prevents this entry from appearing as a navigable month
+          //    in the BenefitPage month selector (only real allotments/expenses show as months).
           if (carry > 0) {
             allotments[prevKey] = { mode: "amount", amount: carry, _isCarryOver: true };
           }
@@ -2646,14 +2648,16 @@ function BenefitPage({ store, account, onClose }) {
     const Y = today.getFullYear(), M = today.getMonth();
     const fmt = (y,m) => `${y}-${String(m+1).padStart(2,'0')}`;
     const currentKey = fmt(Y, M);
-    // Past months that still have expenses or allotments
+    // Past months that still have real expenses or real allotments.
+    // Synthetic carry-over entries (_isCarryOver: true) are excluded so they don't
+    // appear as navigable months after a cleanup.
     const pastWithData = new Set();
     (benefitAcct.expenses || []).forEach(e => {
       const mk = mKey(e.date);
       if (mk < currentKey) pastWithData.add(mk);
     });
     Object.keys(benefitAcct.allotments || {}).forEach(mk => {
-      if (mk < currentKey) pastWithData.add(mk);
+      if (mk < currentKey && !benefitAcct.allotments[mk]?._isCarryOver) pastWithData.add(mk);
     });
     const result = [...pastWithData].sort();
     result.push(fmt(Y, M));
@@ -3184,6 +3188,55 @@ function Dashboard({ store, onAdd, onGoSavings, onGoCheckingStats, onResetRef, a
   const synthTotal = synthCardEntries.reduce((s,e) => s + e.total, 0);
   const displayBalance = balanceWithCard - synthTotal;
 
+  // Solde pointé : uniquement les transactions pointées du mois
+  const pointedBalance = useMemo(() => {
+    const ptxM = store.transactions.filter(t =>
+      !t.isCard &&
+      t.accountId === selectedAccountId &&
+      mKey(t.date) === sel &&
+      t.pointed
+    );
+    const ptBal = ptxM.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0)
+                - ptxM.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
+    const ptCard = (hasCard
+      ? store.transactions.filter(t => t.isCard && t.accountId === selectedAccountId && mKey(t.date) === sel && t.pointed)
+      : []).reduce((s,t) => s + (t.type==="expense" ? t.amount : -t.amount), 0);
+    return ptBal - ptCard - synthTotal;
+  }, [store.transactions, selectedAccountId, sel, hasCard, synthTotal]);
+
+  // Solde pointé sans carte du mois courant, mais avec les prélèvements carte
+  // des mois précédents dont la date de débit est passée ou aujourd'hui.
+  const pointedNoCardBalance = useMemo(() => {
+    const today = nowMKey(); // "YYYY-MM" du jour
+    const todayStr = new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
+
+    // Transactions pointées du mois, hors carte
+    const ptxM = store.transactions.filter(t =>
+      !t.isCard &&
+      t.accountId === selectedAccountId &&
+      mKey(t.date) === sel &&
+      t.pointed
+    );
+    const ptBal = ptxM.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0)
+                - ptxM.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
+
+    // Prélèvements carte de mois précédents dont la date de débit tombe dans
+    // le mois affiché (sel) ET est déjà passée ou aujourd'hui
+    const cdd = store.cardDebitDates[selectedAccountId] || {};
+    let pastSynthTotal = 0;
+    Object.entries(cdd).forEach(([sourceMk, debitDateStr]) => {
+      if (!debitDateStr) return;
+      if (mKey(debitDateStr) === sel && sourceMk !== sel && debitDateStr <= todayStr) {
+        const sourceTxs = store.transactions.filter(t =>
+          t.isCard && t.accountId === selectedAccountId && mKey(t.date) === sourceMk
+        );
+        pastSynthTotal += sourceTxs.reduce((s,t) => s + (t.type==="expense" ? t.amount : -t.amount), 0);
+      }
+    });
+
+    return ptBal - pastSynthTotal;
+  }, [store.transactions, store.cardDebitDates, selectedAccountId, sel]);
+
   // Income/expense display totals: include all transactions + synth card debits
 
   const expns  = allTxM.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0) + Math.max(0, synthTotal);
@@ -3207,6 +3260,9 @@ function Dashboard({ store, onAdd, onGoSavings, onGoCheckingStats, onResetRef, a
 
   const [showTransferConfirm,   setShowTransferConfirm]   = useState(false);
   const [showUnpointedWarning,  setShowUnpointedWarning]  = useState(false);
+  const [balanceView, setBalanceView] = useState(0); // 0=complet 1=pointé sans carte
+  // Réinitialiser le cycle solde à chaque changement de compte / mois
+  useEffect(() => { setBalanceView(0); }, [selectedAccountId, sel]);
 
   // Transactions du mois source non-pointées (hors carte et hors reports)
   const unpointedTxs = useMemo(() => {
@@ -3304,13 +3360,37 @@ function Dashboard({ store, onAdd, onGoSavings, onGoCheckingStats, onResetRef, a
         )}
 
         {/* Balance card (individual account) */}
-        {selectedAccountId!=="all" && (
-          <div className="fade-up" style={{ background:displayBalance>=0?"linear-gradient(135deg,#1e2a1e,#162216)":"linear-gradient(135deg,#2a1e1e,#221616)", border:`1px solid ${displayBalance>=0?"rgba(76,175,130,0.3)":"rgba(224,92,92,0.3)"}`, borderRadius:"var(--radius)", padding:"16px", position:"relative", overflow:"hidden" }}>
-            <div style={{ position:"absolute", top:-15, right:-15, width:80, height:80, borderRadius:"50%", background:displayBalance>=0?"rgba(76,175,130,0.06)":"rgba(224,92,92,0.06)" }} />
+        {selectedAccountId!=="all" && (() => {
+          const VIEWS = [
+            { bal: displayBalance,        label: `Solde ${selAcct?.name||""} prévu`, sub: "toutes opérations",                       dot: "○" },
+            { bal: pointedNoCardBalance,  label: `Solde ${selAcct?.name||""} réel`,  sub: "hors non pointées + carte mois en cours", dot: "◎" },
+          ];
+          const view      = VIEWS[balanceView];
+          const shownBal  = view.bal;
+          const isPos     = shownBal >= 0;
+          const bgGrad    = isPos ? "linear-gradient(135deg,#1e2a1e,#162216)" : "linear-gradient(135deg,#2a1e1e,#221616)";
+          const borderClr = isPos ? "rgba(76,175,130,0.3)" : "rgba(224,92,92,0.3)";
+          const amtClr    = isPos ? "#4caf82" : "#e05c5c";
+          const glowClr   = isPos ? "rgba(76,175,130,0.06)" : "rgba(224,92,92,0.06)";
+          const titles    = ["Afficher le solde pointé sans carte", "Afficher le solde complet"];
+          return (
+          <div className="fade-up" style={{ background:bgGrad, border:`1px solid ${borderClr}`, borderRadius:"var(--radius)", padding:"16px", position:"relative", overflow:"hidden" }}>
+            <div style={{ position:"absolute", top:-15, right:-15, width:80, height:80, borderRadius:"50%", background:glowClr }} />
             <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12 }}>
-              <div>
-                <p style={{ fontSize:11, fontWeight:500, color:"rgba(240,236,228,0.5)", letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:6 }}>Solde {selAcct?.name||""}</p>
-                <p style={{ fontFamily:"'DM Serif Display',serif", fontSize:28, color:displayBalance>=0?"#4caf82":"#e05c5c", letterSpacing:"-0.02em" }}>{fmtEur(displayBalance)}</p>
+              <div
+                onClick={() => !isSavings && setBalanceView(v => (v + 1) % 2)}
+                title={!isSavings ? titles[balanceView] : undefined}
+                style={{ cursor: isSavings ? "default" : "pointer", userSelect:"none" }}>
+                <p style={{ fontSize:11, fontWeight:500, color:"rgba(240,236,228,0.5)", letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:6, display:"flex", alignItems:"center", gap:6 }}>
+                  {view.label}
+                  {!isSavings && <span style={{ fontSize:10, opacity:0.5, fontWeight:400 }}>{view.dot}</span>}
+                </p>
+                <p style={{ fontFamily:"'DM Serif Display',serif", fontSize:28, color:amtClr, letterSpacing:"-0.02em", transition:"color 0.2s" }}>{fmtEur(shownBal)}</p>
+                {!isSavings && (
+                  <p style={{ fontSize:10, color:"rgba(240,236,228,0.35)", marginTop:3, fontWeight:400 }}>
+                    {view.sub}
+                  </p>
+                )}
               </div>
               {!isSavings && sel <= nowMKey() && (
                 <button
@@ -3328,7 +3408,8 @@ function Dashboard({ store, onAdd, onGoSavings, onGoCheckingStats, onResetRef, a
               )}
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* All accounts breakdown */}
         {/* Income / Expense — affiché AVANT le tableau des comptes en vue globale */}
