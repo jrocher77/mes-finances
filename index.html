@@ -173,6 +173,7 @@
       justify-content: center;
       overflow: hidden;
       padding-top: max(8px, env(safe-area-inset-top));
+      box-sizing: border-box;
     }
 
     .form-modal-sheet {
@@ -185,19 +186,38 @@
       border: 1px solid var(--border);
       border-bottom: none;
       border-radius: 24px 24px 0 0;
-      overflow-y: auto;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
       overscroll-behavior: contain;
-      -webkit-overflow-scrolling: touch;
       transform: translateZ(0);
-      padding: 0 0 max(24px, calc(24px + env(safe-area-inset-bottom)));
+    }
+
+    .form-modal-sheet *,
+    .form-modal-sheet *::before,
+    .form-modal-sheet *::after {
+      box-sizing: border-box;
+      max-width: 100%;
     }
 
     .form-modal-header {
-      position: sticky;
-      top: 0;
+      flex-shrink: 0;
       z-index: 2;
       background: var(--surface);
       border-bottom: 1px solid var(--border);
+    }
+
+    .form-modal-body {
+      width: 100%;
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+      padding-bottom: max(24px, calc(24px + env(safe-area-inset-bottom))) !important;
     }
 
     @media (max-width: 520px) {
@@ -209,6 +229,7 @@
       .form-modal-sheet {
         max-width: none;
         max-height: calc(100dvh - max(6px, env(safe-area-inset-top)));
+        width: 100%;
         margin-top: auto;
         border-left: none;
         border-right: none;
@@ -4874,7 +4895,7 @@ function FormModal({ store, account, transaction, onClose, isCardTransaction=fal
             <button onClick={onClose} style={{ background:"var(--surface2)", border:"1px solid var(--border)", borderRadius:8, width:32,height:32, color:"var(--text-muted)", fontSize:16, display:"flex", alignItems:"center", justifyContent:"center" }}>✕</button>
           </div>
         </div>
-        <div style={{ padding:"0 20px", display:"flex", flexDirection:"column", gap:14 }}>
+        <div className="form-modal-body" style={{ padding:"0 20px", display:"flex", flexDirection:"column", gap:14 }}>
 
           {/* ── Sélecteur de mode ── */}
           {!isEditing && (
