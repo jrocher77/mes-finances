@@ -1,0 +1,4 @@
+interface:
+  display_name: "Gherkin Test Campaign"
+  short_description: "Run Gherkin tests with PDF evidence reports."
+  default_prompt: "Use $gherkin-test-campaign to execute these Gherkin scenarios and generate the evidence-backed PDF test report."
