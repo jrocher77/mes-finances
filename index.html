@@ -256,6 +256,25 @@ function nowMKey() {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
 }
 function isExternalStatTx(t) { return !t._transferFrom && !t._virementId; }
+function computeCheckingStats(transactions, accountId, monthKey) {
+  const regular = transactions.filter(t => mKey(t.date) === monthKey && t.accountId === accountId && !t.isCard);
+  const cardTxs = transactions.filter(t => mKey(t.date) === monthKey && t.accountId === accountId && t.isCard);
+  if (regular.length === 0 && cardTxs.length === 0) return null;
+
+  const statRegular = regular.filter(isExternalStatTx);
+  const statCardTxs = cardTxs.filter(isExternalStatTx);
+  const income  = statRegular.filter(t => t.type === "income").reduce((s,t) => s+t.amount, 0);
+  const expense = statRegular.filter(t => t.type === "expense").reduce((s,t) => s+t.amount, 0)
+                + statCardTxs.reduce((s,t) => s+(t.type==="expense"?t.amount:-t.amount), 0);
+  const balance = income - expense;
+  const statTxs = [...statRegular, ...statCardTxs];
+  return {
+    income, expense, balance,
+    total: statTxs.length,
+    pointed: statTxs.filter(t => t.pointed).length,
+    rawTotal: regular.length + cardTxs.length,
+  };
+}
 function isEven(mk){ return parseInt(mk.split("-")[1],10) % 2 === 0; }
 function dBack(n)  { const d = new Date(); d.setDate(d.getDate()-n); return d.toISOString().split("T")[0]; }
 
@@ -1123,25 +1142,15 @@ function useStore(uid, email) {
         // Un seul snapshot par compte par mois précédent
         if (checkingHistoryRef.current.some(e => e.accountId === acc.id && e.monthKey === prevMk)) return;
 
-        const regular = tx.filter(t => mKey(t.date) === prevMk && t.accountId === acc.id && !t.isCard);
-        const cardTxs = tx.filter(t => mKey(t.date) === prevMk && t.accountId === acc.id && t.isCard);
-        if (regular.length === 0 && cardTxs.length === 0) return;
+        const stats = computeCheckingStats(tx, acc.id, prevMk);
+        if (!stats) return;
 
-        const statRegular = regular.filter(isExternalStatTx);
-        const statCardTxs = cardTxs.filter(isExternalStatTx);
-        const income  = statRegular.filter(t => t.type === "income").reduce((s,t) => s+t.amount, 0);
-        const expense = statRegular.filter(t => t.type === "expense").reduce((s,t) => s+t.amount, 0)
-                      + statCardTxs.reduce((s,t) => s+(t.type==="expense"?t.amount:-t.amount), 0);
-        const balance = income - expense;
-        const statTxs = [...statRegular, ...statCardTxs];
-        const total   = statTxs.length;
-        const pointed = statTxs.filter(t => t.pointed).length;
         const dateKey = `${today.getFullYear()}-${pad(today.getMonth()+1)}-${pad(currentDay)}`;
         addCheckingSnapshot({
           date: dateKey, monthKey: prevMk,
           accountId: acc.id, accountName: acc.name,
-          income, expense, balance,
-          total, pointed, auto: true,
+          income: stats.income, expense: stats.expense, balance: stats.balance,
+          total: stats.total, pointed: stats.pointed, auto: true,
         });
         dbg(`📊 Auto-snapshot checking — ${acc.name} / ${prevMk} (pris le ${currentDay})`);
       });
@@ -1160,6 +1169,19 @@ function useStore(uid, email) {
       }
     }
   }, [ready, autoCleanup, cleanupDay, cardDebitDates, benefitData, doCleanup, cleanupBlockers, transactions, accounts]);
+
+  // ── One-off cleanup: drop unreliable March 2026 checking snapshots ───────
+  useEffect(() => {
+    if (!ready || !loadedRef.current || !trustedRef.current) return;
+    const monthToDrop = "2026-03";
+    if (!checkingHistory.some(e => e.monthKey === monthToDrop)) return;
+
+    setCheckingHistory(prev => {
+      const next = prev.filter(e => e.monthKey !== monthToDrop);
+      if (next.length !== prev.length) dbg(`🗑️ Suppression snapshots comptes courants — ${monthToDrop}`);
+      return next.length !== prev.length ? next : prev;
+    });
+  }, [ready, checkingHistory]);
 
   // ── Benefit reconciliation batch ─────────────────────────────────────────
   // Runs once after Firestore data is fully loaded.
@@ -1744,6 +1766,7 @@ function App() {
             <button onClick={store.clearSaveError} style={{ background:"rgba(255,255,255,0.2)", border:"none", borderRadius:6, color:"#fff", fontSize:12, fontWeight:700, padding:"4px 10px", cursor:"pointer" }}>&#x2715;</button>
           </div>
         )}
+        <BourseAccountSync store={store} user={user} />
         <div ref={scrollRef} style={{ flex:1, overflowY:"auto", paddingBottom:80 }}>
           {tab==="dashboard"     && <Dashboard    store={store} onAdd={handleOpenForm} onGoSavings={()=>setTab("savingsStats")} onGoCheckingStats={()=>setTab("checkingStats")} onResetRef={dashboardResetRef} accountRowSize={accountRowSize} />}
           {tab==="transactions"  && <Transactions store={store} onAdd={handleOpenForm} />}
@@ -1873,6 +1896,57 @@ function _mapYfSearchQuotes(quotes) {
     }));
 }
 
+async function fetchBoursePortfolioValue(positions, cashEur) {
+  let total = cashEur || 0;
+  for (const p of positions) {
+    const d = await yfFetch(p.symbol, `interval=1m&range=1d`);
+    const price = d?.chart?.result?.[0]?.meta?.regularMarketPrice;
+    if (price == null) return null;
+    total += price * (p.quantite || 0);
+  }
+  return Math.round(total * 100) / 100;
+}
+
+function BourseAccountSync({ store, user }) {
+  const uid = user?.uid;
+  const linkedSavingsAccountId = store?.uiPrefs?.bourseLinkedSavingsAccountId || "";
+  const linkedSavingsAccount = store?.accounts?.find(a => a.id === linkedSavingsAccountId && a.type === "savings");
+  const [portfolio, setPortfolio] = useState({ positions: [], cashEur: 0 });
+
+  useEffect(() => {
+    if (!uid) return;
+    const { db, doc, onSnapshot } = fb();
+    const ref = doc(db, "budgets", uid);
+    const unsub = onSnapshot(ref, snap => {
+      const data = snap.exists() ? snap.data() : null;
+      setPortfolio({
+        positions: Array.isArray(data?.portefeuille) ? data.portefeuille : [],
+        cashEur: typeof data?.portefeuilleCashEur === "number" ? data.portefeuilleCashEur : 0,
+      });
+    });
+    return () => unsub();
+  }, [uid]);
+
+  const portfolioKey = useMemo(
+    () => JSON.stringify({ positions: portfolio.positions, cashEur: portfolio.cashEur }),
+    [portfolio.positions, portfolio.cashEur]
+  );
+
+  useEffect(() => {
+    if (!linkedSavingsAccount) return;
+    let cancelled = false;
+    (async () => {
+      const total = await fetchBoursePortfolioValue(portfolio.positions, portfolio.cashEur);
+      if (cancelled || total === null) return;
+      if (Math.abs((linkedSavingsAccount.balance || 0) - total) < 0.01) return;
+      store.updateAccount(linkedSavingsAccount.id, { balance: total });
+    })();
+    return () => { cancelled = true; };
+  }, [linkedSavingsAccount?.id, linkedSavingsAccount?.balance, portfolioKey]);
+
+  return null;
+}
+
 function BoursePage({ store, user }) {
   const uid = user?.uid;
   const [positions, setPositions] = useState([]);
@@ -1882,6 +1956,9 @@ function BoursePage({ store, user }) {
   const [lastRefresh, setLastRefresh] = useState(null);
   const [showForm, setShowForm]   = useState(false);
   const [editPos, setEditPos]     = useState(null);
+  const [cashEur, setCashEur]     = useState(0);
+  const [cashDraft, setCashDraft] = useState("");
+  const [editingCash, setEditingCash] = useState(false);
 
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const searchDebounce = useRef(null);
@@ -1894,15 +1971,27 @@ function BoursePage({ store, user }) {
     const unsub = onSnapshot(ref, snap => {
       const data = snap.exists() ? snap.data() : null;
       setPositions(data?.portefeuille || []);
+      setCashEur(typeof data?.portefeuilleCashEur === "number" ? data.portefeuilleCashEur : 0);
     });
     return () => unsub();
   }, [uid]);
+
+  useEffect(() => {
+    if (!editingCash) setCashDraft(cashEur ? String(cashEur) : "");
+  }, [cashEur, editingCash]);
 
   // ── Sauvegarde dans Firestore ──────────────────────────────────────────────
   const savePositions = useCallback(async (pos) => {
     if (!uid) return;
     setSaving(true);
     try { await fbSave(uid, { portefeuille: pos }); }
+    finally { setSaving(false); }
+  }, [uid]);
+
+  const saveCash = useCallback(async (amount) => {
+    if (!uid) return;
+    setSaving(true);
+    try { await fbSave(uid, { portefeuilleCashEur: amount }); }
     finally { setSaving(false); }
   }, [uid]);
 
@@ -2006,14 +2095,29 @@ function BoursePage({ store, user }) {
 
   const totalAchat    = rows.reduce((s, r) => s + r.valeurAchat, 0);
   const totalActuel   = rows.reduce((s, r) => r.valeurActuelle !== null ? s + r.valeurActuelle : s, 0);
+  const totalPortefeuille = totalActuel + cashEur;
+  const marketValueReady = positions.length === 0 || rows.every(r => r.valeurActuelle !== null);
   const totalPV       = totalActuel - totalAchat;
   const totalPVPct    = totalAchat > 0 ? (totalPV / totalAchat) * 100 : 0;
   const totalVariJour = rows.reduce((s, r) => r.variJour !== null ? s + r.variJour : s, 0);
+  const linkedSavingsAccountId = store?.uiPrefs?.bourseLinkedSavingsAccountId || "";
+  const linkedSavingsAccount = store?.accounts?.find(a => a.id === linkedSavingsAccountId && a.type === "savings");
 
   // ── Helpers UI ────────────────────────────────────────────────────────────
   const clr = v => v > 0 ? "#4caf7d" : v < 0 ? "#e05c5c" : "var(--text-muted)";
   const fmtN = (n, dec=2) => n === null || n === undefined ? "—" : (n >= 0 ? "+" : "") + n.toFixed(dec);
   const fmtPrice = n => n === null ? "—" : n.toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const parseMoney = v => {
+    const n = parseFloat(String(v).replace(",", "."));
+    return Number.isFinite(n) ? Math.max(0, Math.round(n * 100) / 100) : 0;
+  };
+
+  useEffect(() => {
+    if (!linkedSavingsAccount || !marketValueReady) return;
+    const syncedBalance = Math.round(totalPortefeuille * 100) / 100;
+    if (Math.abs((linkedSavingsAccount.balance || 0) - syncedBalance) < 0.01) return;
+    store.updateAccount(linkedSavingsAccount.id, { balance: syncedBalance });
+  }, [linkedSavingsAccount?.id, linkedSavingsAccount?.balance, marketValueReady, totalPortefeuille]);
 
   // ── Formulaire d'ajout/édition ────────────────────────────────────────────
   function PositionForm({ initial, onSave, onClose }) {
@@ -2157,6 +2261,13 @@ function BoursePage({ store, user }) {
     setDeleteConfirm(null);
   };
 
+  const handleSaveCash = () => {
+    const amount = parseMoney(cashDraft);
+    setCashEur(amount);
+    saveCash(amount);
+    setEditingCash(false);
+  };
+
   // ── Pull-to-refresh ────────────────────────────────────────────────────────
   const scrollRef = React.useRef(null);
   const ptrStartY = React.useRef(null);
@@ -2275,13 +2386,13 @@ function BoursePage({ store, user }) {
         <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
 
           {/* ── Récapitulatif portefeuille ── */}
-          {positions.length > 0 && (
+          {(positions.length > 0 || cashEur > 0) && (
             <div className="fade-up" style={{ background:"var(--surface)", borderRadius:16, padding:"16px", border:"1px solid var(--border)" }}>
               <p style={{ fontSize:12, color:"var(--text-muted)", marginBottom:8, fontWeight:500, letterSpacing:"0.05em", textTransform:"uppercase" }}>Portefeuille total</p>
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-end", marginBottom:12 }}>
                 <div>
-                  <p style={{ fontSize:26, fontWeight:700, letterSpacing:"-0.02em" }}>{fmtPrice(totalActuel)} <span style={{ fontSize:13, color:"var(--text-muted)", fontWeight:400 }}>Euros</span></p>
-                  <p style={{ fontSize:12, color:"var(--text-muted)", marginTop:2 }}>Investi : {fmtPrice(totalAchat)}</p>
+                  <p style={{ fontSize:26, fontWeight:700, letterSpacing:"-0.02em" }}>{fmtPrice(totalPortefeuille)} <span style={{ fontSize:13, color:"var(--text-muted)", fontWeight:400 }}>Euros</span></p>
+                  <p style={{ fontSize:12, color:"var(--text-muted)", marginTop:2 }}>Positions : {fmtPrice(totalActuel)} · Espèces : {fmtPrice(cashEur)}</p>
                 </div>
                 <div style={{ textAlign:"right" }}>
                   <p style={{ fontSize:16, fontWeight:600, color:clr(totalPV) }}>{fmtN(totalPV)} <span style={{ fontSize:13 }}>({fmtN(totalPVPct)}%)</span></p>
@@ -2291,6 +2402,43 @@ function BoursePage({ store, user }) {
               {lastRefresh && <p style={{ fontSize:11, color:"var(--text-sub)", textAlign:"right" }}>Mis à jour {lastRefresh.toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"})}</p>}
             </div>
           )}
+
+          {/* ── Espèces disponibles ── */}
+          <div className="fade-up" style={{ background:"var(--surface)", borderRadius:14, padding:"14px 16px", border:"1px solid var(--border)" }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:10, minWidth:0 }}>
+                <div style={{ width:36, height:36, borderRadius:10, background:"var(--green-dim)", color:"var(--green)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, fontWeight:700 }}>€</div>
+                <div>
+                  <p style={{ fontSize:11, color:"var(--text-muted)", fontWeight:600, letterSpacing:"0.05em", textTransform:"uppercase", marginBottom:2 }}>Espèces disponibles</p>
+                  <p style={{ fontSize:10, color:"var(--text-sub)" }}>Non placées sur une position</p>
+                </div>
+              </div>
+              {editingCash ? (
+                <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={cashDraft}
+                    onChange={e=>setCashDraft(e.target.value)}
+                    onKeyDown={e => { if (e.key === "Enter") handleSaveCash(); if (e.key === "Escape") { setEditingCash(false); setCashDraft(cashEur ? String(cashEur) : ""); } }}
+                    autoFocus
+                    style={{ width:110, background:"var(--surface2)", border:"1px solid var(--border)", borderRadius:8, padding:"7px 9px", color:"var(--text)", fontSize:14, textAlign:"right" }}
+                  />
+                  <button onClick={handleSaveCash} style={{ width:30, height:30, borderRadius:8, background:"var(--green-dim)", border:"1px solid var(--green)", color:"var(--green)", fontWeight:700 }}>✓</button>
+                  <button onClick={()=>{ setEditingCash(false); setCashDraft(cashEur ? String(cashEur) : ""); }} style={{ width:30, height:30, borderRadius:8, background:"var(--surface2)", border:"1px solid var(--border)", color:"var(--text-muted)", fontWeight:700 }}>×</button>
+                </div>
+              ) : (
+                <button
+                  onClick={()=>{ setCashDraft(cashEur ? String(cashEur) : ""); setEditingCash(true); }}
+                  style={{ background:"transparent", border:"none", color:"var(--text)", textAlign:"right", cursor:"pointer", padding:0, flexShrink:0 }}
+                >
+                  <p style={{ fontSize:20, fontWeight:700, fontFamily:"'DM Serif Display',serif", color:"var(--green)" }}>{fmtPrice(cashEur)} €</p>
+                  <p style={{ fontSize:10, color:"var(--text-sub)", marginTop:1 }}>Modifier</p>
+                </button>
+              )}
+            </div>
+          </div>
 
           {/* ── Bouton Ajouter ── */}
           <button
@@ -3158,6 +3306,7 @@ function SavingsBalanceRow({ account, balance, store, accountRowSize }) {
   };
 
   const rs = ACCOUNT_ROW_SIZES[accountRowSize] || ACCOUNT_ROW_SIZES.normal;
+  const isBourseLinked = store.uiPrefs?.bourseLinkedSavingsAccountId === account.id;
   return (
     <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:rs.padding, background:"var(--surface2)", borderRadius:"var(--radius-sm)" }}>
       <div style={S.flexRow8}>
@@ -3165,6 +3314,11 @@ function SavingsBalanceRow({ account, balance, store, accountRowSize }) {
         <span style={{ fontSize:10, fontWeight:600, padding:"2px 6px", borderRadius:6, background:account.savingsSubtype==="blocked"?"var(--red-dim)":"var(--green-dim)", color:account.savingsSubtype==="blocked"?"var(--red)":"var(--green)" }}>
           {account.savingsSubtype==="blocked"?"🔒 Bloquée":"✓ Disponible"}
         </span>
+        {isBourseLinked && (
+          <span style={{ fontSize:10, fontWeight:600, padding:"2px 6px", borderRadius:6, background:"var(--gold-dim)", color:"var(--gold)" }}>
+            Bourse
+          </span>
+        )}
       </div>
       {editing ? (
         <div style={{ display:"flex", alignItems:"center", gap:6 }}>
@@ -3395,20 +3549,18 @@ function Dashboard({ store, onAdd, onGoSavings, onGoCheckingStats, onResetRef, a
     return ptBal - pastSynthTotal;
   }, [store.transactions, store.cardDebitDates, selectedAccountId, sel]);
 
-  // Income/expense display totals: include all transactions + synth card debits
-
-  const expns  = allTxM.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0) + Math.max(0, synthTotal);
-  const synthIncome = Math.max(0, -synthTotal); // crédit carte différé (solde positif)
-  const income = allTxM.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0) + synthIncome;
+  // Income/expense display totals: same external-transaction rules as checking stats.
+  const detailStats = selectedAccountId !== "all" && !isSavings
+    ? computeCheckingStats(store.transactions, selectedAccountId, sel)
+    : null;
+  const income = detailStats?.income || 0;
+  const expns  = detailStats?.expense || 0;
 
   const nextMk = nextMonthKey(sel);
   const nextMonthName = new Date(nextMk + "-02T00:00:00").toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
 
-  // Transfer balance:
-  // - Prélèvement carte ce mois-ci → carte déjà soldée → on transfère displayBalance (carte déduite)
-  // - Prélèvement carte mois suivant → la ligne synthèse est déjà en nextMk → on transfère AVANT déduction carte
-  const cardDebitInNextMonth = hasCard && cardDebitDate && mKey(cardDebitDate) === nextMk;
-  const transferBalance = cardDebitInNextMonth ? balance : displayBalance;
+  // Transfer balance: use the same "real" balance shown when clicking the account balance.
+  const transferBalance = pointedNoCardBalance;
 
   // Check if a transfer transaction already exists for this account+month combo
   const TRANSFER_TAG = "__transfer__";
@@ -4104,6 +4256,30 @@ function Settings({ store, user, accountRowSize, setAccountRowSize }) {
               </div>
             );
           })()}
+          <div style={{ borderTop:"1px solid var(--border)", padding:"14px 16px" }}>
+            <div style={S.flexRow10}>
+              <span style={{ fontSize:22 }}>💰</span>
+              <div style={{ flex:1 }}>
+                <p style={S.fs14fw500}>Compte épargne lié au portefeuille</p>
+                <p style={{ fontSize:12, color:"var(--text-muted)", marginBottom:10 }}>
+                  Le solde du compte choisi reprend la valeur totale Bourse : positions + espèces.
+                </p>
+                <select
+                  value={store.uiPrefs?.bourseLinkedSavingsAccountId || ""}
+                  onChange={e => store.saveUiPref("bourseLinkedSavingsAccountId", e.target.value)}
+                  style={{ width:"100%", padding:"8px 10px", borderRadius:8, border:"1px solid var(--border2)", background:"var(--surface2)", color:"var(--text)", fontSize:13, appearance:"auto" }}
+                >
+                  <option value="">Aucun compte lié</option>
+                  {store.accounts.filter(a => a.type === "savings").map(acc => (
+                    <option key={acc.id} value={acc.id}>{acc.name} · {fmtEur(acc.balance || 0)}</option>
+                  ))}
+                </select>
+                {store.accounts.filter(a => a.type === "savings").length === 0 && (
+                  <p style={{ fontSize:11, color:"var(--text-sub)", marginTop:6 }}>Ajoutez d'abord un compte épargne pour activer le lien.</p>
+                )}
+              </div>
+            </div>
+          </div>
           <div style={{ borderTop:"1px solid var(--border)", display:"flex", justifyContent:"space-between", alignItems:"center", padding:"14px 16px" }}>
             <div style={S.flexRow10}>
               <span style={{ fontSize:22 }}>💱</span>
@@ -4767,14 +4943,20 @@ function TplAddModal({ onClose, onSave, item }) {
 
 // ─── FormModal ─────────────────────────────────────────────────────────────
 // Helper : solde d'un compte pour un mois donné (toutes transactions incluses)
-function useAccountMonthBalance(store, accountId, monthKey) {
+function useAccountMonthBalance(store, accountId, monthKey, excludeVirementId=null, excludeIds=[]) {
   return useMemo(() => {
     if (!accountId || !monthKey) return null;
-    const txs = store.transactions.filter(t => t.accountId === accountId && t.date.slice(0,7) === monthKey);
+    const excludedIds = new Set(excludeIds);
+    const txs = store.transactions.filter(t =>
+      t.accountId === accountId &&
+      t.date.slice(0,7) === monthKey &&
+      (!excludeVirementId || t._virementId !== excludeVirementId) &&
+      !excludedIds.has(t.id)
+    );
     const inc = txs.filter(t => t.type === "income").reduce((s,t)=>s+t.amount, 0);
     const exp = txs.filter(t => t.type === "expense").reduce((s,t)=>s+t.amount, 0);
     return inc - exp;
-  }, [store.transactions, accountId, monthKey]);
+  }, [store.transactions, accountId, monthKey, excludeVirementId, excludeIds.join("|")]);
 }
 
 function FormModal({ store, account, transaction, onClose, isCardTransaction=false, sel=null }) {
@@ -4792,8 +4974,28 @@ function FormModal({ store, account, transaction, onClose, isCardTransaction=fal
   })();
 
   const checkingAccounts = store.accounts.filter(a => a.type === "checking");
-  const firstAcctId  = transaction?.accountId || account || checkingAccounts[0]?.id || "";
-  const secondAcctId = checkingAccounts.find(a => a.id !== firstAcctId)?.id || "";
+  const editedTransferTxs = transaction?._virementId
+    ? store.transactions.filter(t => t._virementId === transaction._virementId)
+    : [];
+  const editedTransferFallbackTxs = transaction?._virementId
+    ? store.transactions.filter(t =>
+        t.id !== transaction.id &&
+        t.date === transaction.date &&
+        t.amount === transaction.amount &&
+        t.title === transaction.title &&
+        t.type !== transaction.type
+      )
+    : [];
+  const editedTransferSource = editedTransferTxs.find(t => t.type === "expense")
+    || (transaction?._virementId && transaction?.type === "expense" ? transaction : null)
+    || editedTransferFallbackTxs.find(t => t.type === "expense")
+    || null;
+  const editedTransferDest = editedTransferTxs.find(t => t.type === "income")
+    || (transaction?._virementId && transaction?.type === "income" ? transaction : null)
+    || editedTransferFallbackTxs.find(t => t.type === "income")
+    || null;
+  const firstAcctId  = editedTransferSource?.accountId || transaction?.accountId || account || checkingAccounts[0]?.id || "";
+  const secondAcctId = editedTransferDest?.accountId || checkingAccounts.find(a => a.id !== firstAcctId)?.id || "";
 
   const [mode,      setMode]      = useState(transaction ? (transaction._virementId ? "transfer" : transaction.type) : "expense");
   const [title,     setTitle]     = useState(transaction?.title || "");
@@ -4837,23 +5039,30 @@ function FormModal({ store, account, transaction, onClose, isCardTransaction=fal
   const parsedAmount = parseFloat(amount.replace(",","."));
   const amountValid  = !isNaN(parsedAmount) && parsedAmount > 0;
 
+  const editedTransferId = isEditing && isTransfer ? transaction?._virementId : null;
+  const editedTransferExcludeIds = isEditing && isTransfer
+    ? [...new Set([...editedTransferTxs, editedTransferSource, editedTransferDest].filter(Boolean).map(t => t.id))]
+    : [];
   const srcBalance = useAccountMonthBalance(store, srcAcctId, dateMKey);
   const dstBalance = useAccountMonthBalance(store, isTransfer ? dstAcctId : null, dateMKey);
+  const srcBaseBalance = useAccountMonthBalance(store, srcAcctId, dateMKey, editedTransferId, editedTransferExcludeIds);
+  const dstBaseBalance = useAccountMonthBalance(store, isTransfer ? dstAcctId : null, dateMKey, editedTransferId, editedTransferExcludeIds);
 
   const srcForecast = useMemo(() => {
-    if (srcBalance === null || !amountValid) return null;
-    let base = srcBalance;
+    const balanceForCalc = isTransfer ? srcBaseBalance : srcBalance;
+    if (balanceForCalc === null || !amountValid) return null;
+    let base = balanceForCalc;
     if (isEditing && !isTransfer) {
       base += transaction.type === "income" ? -transaction.amount : transaction.amount;
     }
     const delta = isTransfer ? -parsedAmount : (mode === "income" ? parsedAmount : -parsedAmount);
     return base + delta;
-  }, [srcBalance, amountValid, parsedAmount, mode, isTransfer, isEditing, transaction]);
+  }, [srcBalance, srcBaseBalance, amountValid, parsedAmount, mode, isTransfer, isEditing, transaction]);
 
   const dstForecast = useMemo(() => {
-    if (!isTransfer || dstBalance === null || !amountValid) return null;
-    return dstBalance + parsedAmount;
-  }, [isTransfer, dstBalance, amountValid, parsedAmount]);
+    if (!isTransfer || dstBaseBalance === null || !amountValid) return null;
+    return dstBaseBalance + parsedAmount;
+  }, [isTransfer, dstBaseBalance, amountValid, parsedAmount]);
 
   // ── Soumission ──────────────────────────────────────────────────────────
   const handleSubmit = () => {
@@ -4864,9 +5073,18 @@ function FormModal({ store, account, transaction, onClose, isCardTransaction=fal
       if (!srcAcctId) return setError("Veuillez sélectionner un compte source.");
       if (!dstAcctId) return setError("Veuillez sélectionner un compte destination.");
       if (srcAcctId === dstAcctId) return setError("Les deux comptes doivent être différents.");
-      const vid = genId();
-      store.add({ title: title.trim(), amount: amt, type: "expense", accountId: srcAcctId, date, note, isCard: false, _virementId: vid });
-      store.add({ title: title.trim(), amount: amt, type: "income",  accountId: dstAcctId, date, note, isCard: false, _virementId: vid });
+      const vid = transaction?._virementId || genId();
+      const sourceData = { title: title.trim(), amount: amt, type: "expense", accountId: srcAcctId, date, note, isCard: false, _virementId: vid };
+      const destData   = { title: title.trim(), amount: amt, type: "income",  accountId: dstAcctId, date, note, isCard: false, _virementId: vid };
+      if (isEditing && transaction?._virementId) {
+        if (editedTransferSource?.id) store.update(editedTransferSource.id, sourceData);
+        else store.add(sourceData);
+        if (editedTransferDest?.id) store.update(editedTransferDest.id, destData);
+        else store.add(destData);
+      } else {
+        store.add(sourceData);
+        store.add(destData);
+      }
     } else {
       if (!selAcctId) return setError("Veuillez sélectionner un compte.");
       const txData = { title: title.trim(), amount: amt, type: mode, accountId: selAcctId, date, note, isCard: acctHasCard ? asCard : false };
@@ -4896,9 +5114,11 @@ function FormModal({ store, account, transaction, onClose, isCardTransaction=fal
       /* Mode virement : deux colonnes côte à côte */
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
         {[
-          { label: store.accounts.find(a=>a.id===srcAcctId)?.name || "Source", current: srcBalance, forecast: srcForecast, delta: srcForecast - srcBalance },
-          { label: store.accounts.find(a=>a.id===dstAcctId)?.name || "Destination", current: dstBalance, forecast: dstForecast, delta: dstForecast !== null ? dstForecast - dstBalance : null },
-        ].map(({ label, current, forecast, delta }) => (
+          { label: store.accounts.find(a=>a.id===srcAcctId)?.name || "Source", current: srcBalance, base: srcBaseBalance, forecast: srcForecast },
+          { label: store.accounts.find(a=>a.id===dstAcctId)?.name || "Destination", current: dstBalance, base: dstBaseBalance, forecast: dstForecast },
+        ].map(({ label, current, base, forecast }) => {
+          const delta = forecast !== null && base !== null ? forecast - base : null;
+          return (
           forecast !== null && (
             <div key={label} style={{
               padding:"10px 12px", borderRadius:"var(--radius-sm)",
@@ -4916,7 +5136,8 @@ function FormModal({ store, account, transaction, onClose, isCardTransaction=fal
               </div>
             </div>
           )
-        ))}
+          );
+        })}
       </div>
     ) : (
       /* Mode normal : un seul bandeau */
@@ -4949,7 +5170,7 @@ function FormModal({ store, account, transaction, onClose, isCardTransaction=fal
       <div className="form-modal-sheet sheet-in">
         <div className="form-modal-header">
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 16px", gap:8 }}>
-            <p style={{ fontFamily:"'DM Serif Display',serif", fontSize:18, letterSpacing:"-0.02em", color:"var(--header-text)", flex:1, margin:0 }}>{isEditing ? "Modifier" : "Nouvelle transaction"}</p>
+            <p style={{ fontFamily:"'DM Serif Display',serif", fontSize:18, letterSpacing:"-0.02em", color:"var(--text)", flex:1, margin:0 }}>{isEditing ? "Modifier" : "Nouvelle transaction"}</p>
             <button onClick={onClose} style={{ background:"var(--surface2)", border:"1px solid var(--border)", borderRadius:8, width:32,height:32, color:"var(--text-muted)", fontSize:16, display:"flex", alignItems:"center", justifyContent:"center" }}>✕</button>
           </div>
         </div>
@@ -5181,18 +5402,8 @@ function CheckingStats({ store, onBack }) {
   const liveStats = useMemo(() => {
     const accounts = accountId === "all" ? checkingAccounts : checkingAccounts.filter(a => a.id === accountId);
     return accounts.map(acc => {
-      const regular = store.transactions.filter(t => mKey(t.date) === nowMk && t.accountId === acc.id && !t.isCard);
-      const cardTxs = store.transactions.filter(t => mKey(t.date) === nowMk && t.accountId === acc.id && t.isCard);
-      const statRegular = regular.filter(isExternalStatTx);
-      const statCardTxs = cardTxs.filter(isExternalStatTx);
-      const income  = statRegular.filter(t => t.type === "income").reduce((s,t) => s+t.amount, 0);
-      const expense = statRegular.filter(t => t.type === "expense").reduce((s,t) => s+t.amount, 0)
-                    + statCardTxs.reduce((s,t) => s+(t.type==="expense"?t.amount:-t.amount), 0);
-      const balance = income - expense;
-      const statTxs = [...statRegular, ...statCardTxs];
-      const total   = statTxs.length;
-      const pointed = statTxs.filter(t => t.pointed).length;
-      return { accountId: acc.id, accountName: acc.name, income, expense, balance, total, pointed };
+      const stats = computeCheckingStats(store.transactions, acc.id, nowMk) || { income: 0, expense: 0, balance: 0, total: 0, pointed: 0 };
+      return { accountId: acc.id, accountName: acc.name, ...stats };
     });
   }, [store.transactions, accountId, checkingAccounts, nowMk]);
 
