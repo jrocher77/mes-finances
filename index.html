@@ -4113,7 +4113,9 @@ function Settings({ store, user, accountRowSize, setAccountRowSize }) {
     // Count past benefit expenses and allotments
     const benefitToDelete = Object.values(store.benefitData).reduce((sum, acct) => {
       const exp = (acct.expenses  || []).filter(e => mKey(e.date) < currentKey).length;
-      const all = Object.keys(acct.allotments || {}).filter(mk => mk < currentKey).length;
+      const all = Object.entries(acct.allotments || {}).filter(([mk, allotment]) =>
+        mk < currentKey && !allotment?._isCarryOver
+      ).length;
       return sum + exp + all;
     }, 0);
     const totalToDelete = toDelete + benefitToDelete;
