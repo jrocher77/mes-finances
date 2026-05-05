@@ -334,6 +334,7 @@ const ACCOUNT_ROW_SIZES = {
 
 const DEFAULT_CLEANUP_DAY  = 10;
 const DEFAULT_AUTO_CLEANUP = true;
+const DEFAULT_LAST_AUTO_CLEANUP_KEY = null; // "YYYY-MM" once automatic cleanup has run for the month
 const DEFAULT_SAVINGS_HISTORY  = [];
 const DEFAULT_CHECKING_HISTORY = []; // { id, date, monthKey, accountId, accountName, income, expense, balance, total, pointed, auto }
 const DEFAULT_SAVINGS_SNAP_DAYS   = [1, 15];
@@ -590,6 +591,7 @@ function useStore(uid, email) {
   const [accounts,     setAccounts]    = useState(DEFAULT_ACCOUNTS);
   const [cleanupDay,   setCleanupDay]   = useState(DEFAULT_CLEANUP_DAY);
   const [autoCleanup,  setAutoCleanup]  = useState(DEFAULT_AUTO_CLEANUP);
+  const [lastAutoCleanupKey, setLastAutoCleanupKey] = useState(DEFAULT_LAST_AUTO_CLEANUP_KEY);
   const [savingsHistory,    setSavingsHistory]    = useState(DEFAULT_SAVINGS_HISTORY);
   const [checkingHistory,   setCheckingHistory]   = useState(DEFAULT_CHECKING_HISTORY);
   const [savingsSnapDays,   setSavingsSnapDays]   = useState(DEFAULT_SAVINGS_SNAP_DAYS);
@@ -609,7 +611,7 @@ function useStore(uid, email) {
   const [retryCount, setRetryCount] = useState(0); // incrementing restarts subscription
   const [saveError, setSaveError]   = useState(false);
   const saveErrorTimer = useRef(null); // auto-dismiss save error after 8s
-  const autoCleanupDoneRef = useRef(false); // prevents auto-cleanup from firing more than once per session
+  const autoCleanupDoneRef = useRef(false); // extra in-session guard while the persisted marker is being saved
 
   // ── Subscribe to Firestore in real-time ─────────────────────────────────
   useEffect(() => {
@@ -685,6 +687,7 @@ function useStore(uid, email) {
         setAccounts( safeAccts.map(a => ({ ...a, balance: a.balance || 0, savingsSubtype: a.savingsSubtype || "available" })) );
         setCleanupDay(data.cleanupDay || DEFAULT_CLEANUP_DAY);
         setAutoCleanup(data.autoCleanup !== undefined ? data.autoCleanup : DEFAULT_AUTO_CLEANUP);
+        setLastAutoCleanupKey(data.lastAutoCleanupKey || DEFAULT_LAST_AUTO_CLEANUP_KEY);
         setSavingsHistory(data.savingsHistory || DEFAULT_SAVINGS_HISTORY);
         setCheckingHistory(data.checkingHistory || DEFAULT_CHECKING_HISTORY);
         setSavingsSnapDays(data.savingsSnapDays || DEFAULT_SAVINGS_SNAP_DAYS);
@@ -737,7 +740,7 @@ function useStore(uid, email) {
           trustedRef.current = true; // New account — we just wrote the initial data, persist is allowed
           lastSaveAt.current = Date.now(); // SAFETY: block echo of this init write immediately
           if (!loadedRef.current) { loadedRef.current = true; dbg(`✅ ready=true (nouveau compte)`); setReady(true); }
-          fbSave(uid, { transactions:initTx, templates:DEFAULT_TPL, accounts:initAccts, cleanupDay:DEFAULT_CLEANUP_DAY, autoCleanup:DEFAULT_AUTO_CLEANUP, savingsHistory:initHistory, checkingHistory:DEFAULT_CHECKING_HISTORY, savingsSnapDays:DEFAULT_SAVINGS_SNAP_DAYS, savingsSnapActive:DEFAULT_SAVINGS_SNAP_ACTIVE, cardDebitDates:initCdd, showFutureTx:DEFAULT_SHOW_FUTURE_TX, benefitData:initBd });
+          fbSave(uid, { transactions:initTx, templates:DEFAULT_TPL, accounts:initAccts, cleanupDay:DEFAULT_CLEANUP_DAY, autoCleanup:DEFAULT_AUTO_CLEANUP, lastAutoCleanupKey:DEFAULT_LAST_AUTO_CLEANUP_KEY, savingsHistory:initHistory, checkingHistory:DEFAULT_CHECKING_HISTORY, savingsSnapDays:DEFAULT_SAVINGS_SNAP_DAYS, savingsSnapActive:DEFAULT_SAVINGS_SNAP_ACTIVE, cardDebitDates:initCdd, showFutureTx:DEFAULT_SHOW_FUTURE_TX, benefitData:initBd });
         }, 3000);
 
         // Don't set ready yet — we're waiting for real data or the grace timer
@@ -769,7 +772,7 @@ function useStore(uid, email) {
   }, [uid, retryCount]);
 
   // ── Auto-save to Firestore (debounced 1s) ───────────────────────────────
-  const persist = useCallback((tx, tpl, acct, cd, ac, sh, ch, ssd, ssa, cdd, sft, bd) => {
+  const persist = useCallback((tx, tpl, acct, cd, ac, lack, sh, ch, ssd, ssa, cdd, sft, bd) => {
     // SAFETY: never write to Firestore before we've confirmed real data from the server.
     // This prevents wiping data on iOS PWA reload when Firestore cache is empty.
     if (!uid || !ready || !trustedRef.current) {
@@ -787,7 +790,7 @@ function useStore(uid, email) {
         return clean;
       });
       dbg(`💾 Sauvegarde Firestore — ${cleanTx.length} tx, ${acct?.length} comptes`);
-      fbSave(uid, { transactions: cleanTx, templates: tpl, accounts: acct, cleanupDay: cd, autoCleanup: ac, savingsHistory: sh, checkingHistory: ch, savingsSnapDays: ssd, savingsSnapActive: ssa, cardDebitDates: cdd, showFutureTx: sft, benefitData: bd })
+      fbSave(uid, { transactions: cleanTx, templates: tpl, accounts: acct, cleanupDay: cd, autoCleanup: ac, lastAutoCleanupKey: lack, savingsHistory: sh, checkingHistory: ch, savingsSnapDays: ssd, savingsSnapActive: ssa, cardDebitDates: cdd, showFutureTx: sft, benefitData: bd })
         .then(() => { setSaveError(false); })
         .catch(() => {
           setSaveError(true);
@@ -877,7 +880,12 @@ function useStore(uid, email) {
           const pastMonths = [...allMonths].filter(mk => mk < currentKey).sort();
           let carry = 0;
           for (const mk of pastMonths) {
-            const allotted = allotmentAmount(acct.allotments?.[mk]);
+            const allotment = acct.allotments?.[mk];
+            if (allotment?._isCarryOver) {
+              carry = Math.max(carry, allotmentAmount(allotment));
+              continue;
+            }
+            const allotted = allotmentAmount(allotment);
             const spent    = (acct.expenses || []).filter(e => mKey(e.date) === mk).reduce((s, e) => s + e.amount, 0);
             carry = Math.max(0, carry + allotted - spent);
           }
@@ -914,8 +922,8 @@ function useStore(uid, email) {
   const [autoCleanupBlockedReasons, setAutoCleanupBlockedReasons] = useState(null);
 
   // ── Persist on every state change ───────────────────────────────────────
-  useEffect(() => { if (ready) persist(transactions, templates, accounts, cleanupDay, autoCleanup, savingsHistory, checkingHistory, savingsSnapDays, savingsSnapActive, cardDebitDates, showFutureTx, benefitData); },
-    [transactions, templates, accounts, cleanupDay, autoCleanup, savingsHistory, checkingHistory, savingsSnapDays, savingsSnapActive, cardDebitDates, showFutureTx, benefitData, ready, persist]);
+  useEffect(() => { if (ready) persist(transactions, templates, accounts, cleanupDay, autoCleanup, lastAutoCleanupKey, savingsHistory, checkingHistory, savingsSnapDays, savingsSnapActive, cardDebitDates, showFutureTx, benefitData); },
+    [transactions, templates, accounts, cleanupDay, autoCleanup, lastAutoCleanupKey, savingsHistory, checkingHistory, savingsSnapDays, savingsSnapActive, cardDebitDates, showFutureTx, benefitData, ready, persist]);
 
   // ── Actions ─────────────────────────────────────────────────────────────
   const add    = tx  => setTx(p => [{ ...tx, id:genId(), pointed:false }, ...p]);
@@ -1157,7 +1165,8 @@ function useStore(uid, email) {
     }
 
     // ── 2. Nettoyage automatique (après le snapshot) ─────────────────────
-    if (autoCleanup && currentDay >= cleanupDay && !autoCleanupDoneRef.current) {
+    const currentKey = `${today.getFullYear()}-${pad(today.getMonth()+1)}`;
+    if (autoCleanup && currentDay >= cleanupDay && lastAutoCleanupKey !== currentKey && !autoCleanupDoneRef.current) {
       const blockers = cleanupBlockers(transactions, accounts, cardDebitDates);
       if (blockers.length > 0) {
         dbg(`🚫 Nettoyage auto bloqué — ${blockers.length} raison(s)`);
@@ -1165,10 +1174,11 @@ function useStore(uid, email) {
       } else {
         dbg(`🧹 Nettoyage auto déclenché (jour ${currentDay} >= ${cleanupDay})`);
         autoCleanupDoneRef.current = true;
+        setLastAutoCleanupKey(currentKey);
         doCleanup(cardDebitDates, benefitData);
       }
     }
-  }, [ready, autoCleanup, cleanupDay, cardDebitDates, benefitData, doCleanup, cleanupBlockers, transactions, accounts]);
+  }, [ready, autoCleanup, cleanupDay, lastAutoCleanupKey, cardDebitDates, benefitData, doCleanup, cleanupBlockers, transactions, accounts]);
 
   // ── One-off cleanup: drop unreliable March 2026 checking snapshots ───────
   useEffect(() => {
@@ -4129,6 +4139,7 @@ function Settings({ store, user, accountRowSize, setAccountRowSize }) {
         accounts: DEMO_ACCOUNTS,
         cleanupDay: DEFAULT_CLEANUP_DAY,
         autoCleanup: DEFAULT_AUTO_CLEANUP,
+        lastAutoCleanupKey: DEFAULT_LAST_AUTO_CLEANUP_KEY,
         savingsHistory: DEMO_SAVINGS_HISTORY,
         savingsSnapDays: DEFAULT_SAVINGS_SNAP_DAYS,
         savingsSnapActive: DEFAULT_SAVINGS_SNAP_ACTIVE,
