@@ -862,6 +862,28 @@ function useStore(uid, email) {
       });
       return filtered.length !== prev.length ? filtered : prev;
     });
+    // Cleanup obsolete card debit dates. Keep current/future source months and
+    // past card cycles whose debit still falls in the current month or later.
+    setCardDebitDates(prev => {
+      let changed = false;
+      const next = {};
+      Object.entries(prev || {}).forEach(([accountId, datesByMonth]) => {
+        const kept = {};
+        Object.entries(datesByMonth || {}).forEach(([sourceMk, debitDate]) => {
+          if (sourceMk >= currentKey || (debitDate && mKey(debitDate) >= currentKey)) {
+            kept[sourceMk] = debitDate;
+          } else {
+            changed = true;
+          }
+        });
+        if (Object.keys(kept).length > 0) {
+          next[accountId] = kept;
+        } else if (Object.keys(datesByMonth || {}).length > 0) {
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
     // Cleanup benefitData: preserve carry-over balance, then remove data strictly before current month.
     // Before purging past months, we compute the accumulated carry-over (allotments − expenses for all
     // months prior to the current one) and inject it as a synthetic allotment on the previous month so
